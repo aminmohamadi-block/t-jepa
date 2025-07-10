@@ -12,3 +12,4 @@ einops
 tensorboard
 rtdl_revisiting_models
 wandb
+mlflow
