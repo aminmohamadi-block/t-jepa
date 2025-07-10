@@ -102,7 +102,7 @@ def train_benchmark_model(args, model_args, profile_name: str):
     test_metrics = trainer.test(model, datamodule=datamodule)
     print("Test metrics: ", test_metrics)
 
-    trainer.save_checkpoint(f"{args["model_name"]}_{args['data_set']}.ckpt")
+    trainer.save_checkpoint(f"{args['model_name']}_{args['data_set']}.ckpt")
 
     return val_metrics, test_metrics, args
 
