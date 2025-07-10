@@ -30,7 +30,8 @@ from src.utils.train_utils import (
     get_dist,
 )
 from tqdm import tqdm
-import wandb
+import mlflow
+import tempfile
 
 
 class Trainer:
@@ -146,10 +147,24 @@ class Trainer:
                         )
                         pass
 
-        wandb.config = {
+        # Initialize MLflow experiment and log parameters
+        self.mlflow_run = mlflow.start_run(run_name=self.job_name)
+
+        # Base parameters
+        base_params = {
             "batch_size": self.batch_size,
             "num_epochs": self.num_epoch,
         }
+
+        # Convert args Namespace to a flat dict of serializable values
+        args_params = {
+            k: (v if isinstance(v, (int, float, bool, str)) else str(v))
+            for k, v in vars(self.args).items()
+        }
+
+        base_params.update(args_params)
+
+        mlflow.log_params(base_params)
 
     def train(
         self,
@@ -226,8 +241,10 @@ class Trainer:
                     nrow=2,
                 )
 
-                images = wandb.Image(img_grid, caption="Sampled data and original data")
-                wandb.log({"embedding images": images})
+                # Log the image grid as an artifact with MLflow
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpfile:
+                    torchvision.utils.save_image(img_grid, tmpfile.name)
+                    mlflow.log_artifact(tmpfile.name, artifact_path="embedding_images")
 
                 collapse_metrics = {
                     "KL": [],
@@ -418,13 +435,16 @@ class Trainer:
                         )
                         pred_grads = pred_grads.cpu().detach().numpy()
 
-                        wandb.log(
-                            {
-                                "context_encoder_grads": wandb.Histogram(ctx_grads),
-                                "target_encoder_grads": wandb.Histogram(trgt_grads),
-                                "predictor_grads": wandb.Histogram(pred_grads),
-                            }
-                        )
+                        # Log gradient statistics with MLflow (mean and std)
+                        grad_metrics = {
+                            "context_encoder_grad_mean": float(np.mean(ctx_grads)) if ctx_grads.size > 0 else 0.0,
+                            "context_encoder_grad_std": float(np.std(ctx_grads)) if ctx_grads.size > 0 else 0.0,
+                            "target_encoder_grad_mean": float(np.mean(trgt_grads)) if trgt_grads.size > 0 else 0.0,
+                            "target_encoder_grad_std": float(np.std(trgt_grads)) if trgt_grads.size > 0 else 0.0,
+                            "predictor_grad_mean": float(np.mean(pred_grads)) if pred_grads.size > 0 else 0.0,
+                            "predictor_grad_std": float(np.std(pred_grads)) if pred_grads.size > 0 else 0.0,
+                        }
+                        mlflow.log_metrics(grad_metrics, step=itr + self.epoch * len(self.dataloader))
 
                     self.optimizer.zero_grad()
                     if self.is_main_process and self.log_tb:
@@ -478,7 +498,10 @@ class Trainer:
             }
             if collapse_metrics is not None:
                 log_dict.update(collapse_metrics)
-            wandb.log(log_dict)
+
+            # MLflow expects scalar metrics; filter and cast appropriately
+            mlflow_log_dict = {k: float(v) for k, v in log_dict.items() if np.isscalar(v)}
+            mlflow.log_metrics(mlflow_log_dict, step=self.epoch)
 
             (
                 early_stop_signal,

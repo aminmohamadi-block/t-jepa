@@ -4,7 +4,7 @@ import random
 
 import numpy as np
 from tabulate import tabulate
-import wandb
+import mlflow
 import torch
 import torch.distributed as dist
 from torch.cuda.amp import GradScaler
@@ -232,9 +232,46 @@ def main(args):
     print("Starting training...")
     trainer.train()
 
+def setup_mlflow_logging() -> None:
+    """
+    Setup MLflow logging for experiment tracking.
+    
+    Configures Databricks MLflow integration with proper authentication
+    and experiment organization.
+    
+    Args:
+        config_dict: Configuration dictionary containing run settings
+    """
+    try:
+        import mlflow
+        from mlflow import MlflowClient
+        
+        # Setup Databricks connection
+        os.environ["DATABRICKS_HOST"] = "https://block-lakehouse-production.cloud.databricks.com"
+        
+        # Handle authentication
+        if os.environ.get("DATABRICKS_TOKEN") is None:
+            if os.environ.get("DATABRICKS_TOKEN_MINE"):
+                os.environ["DATABRICKS_TOKEN"] = os.environ["DATABRICKS_TOKEN_MINE"]
+                print("✓ Using DATABRICKS_TOKEN_MINE for authentication")
+            else:
+                print("⚠️  Warning: DATABRICKS_TOKEN not set - MLflow logging may fail")
+        
+        # Configure MLflow
+        mlflow.set_tracking_uri(uri="databricks")
+        
+        # Set experiment
+        project_name = "t-jepa-test"
+        mlflow.set_experiment(f"/groups/block-aird-team/{project_name}")
+        
+        print(f"✓ MLflow logging configured for project: {project_name}")
+        
+    except ImportError:
+        print("⚠️  MLflow not available - skipping experiment tracking setup")
+
 
 if __name__ == "__main__":
-    wandb.init(mode="offline")
     parser = build_parser()
     args = parser.parse_args()
+    setup_mlflow_logging()
     main(args)
