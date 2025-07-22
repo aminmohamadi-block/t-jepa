@@ -305,8 +305,9 @@ def main(args):
                 " Starting training from scratch."
             )
 
-        for p in target_encoder.parameters():
-            p.requires_grad = False
+    # Always freeze target encoder parameters (critical for T-JEPA training)
+    for p in target_encoder.parameters():
+        p.requires_grad = False
 
     print("[Debug] Instantiating Trainer", flush=True)
 
