@@ -44,6 +44,29 @@ PROBE_CADENCE=20
 PROBE_MODEL="linear_probe"
 TJEPA_RANDOM=false
 N_CLS_TOKENS=1
+LOAD_FROM_CHECKPOINT=False
+LOAD_PATH=""
+
+# Detect number of GPUs requested (from SLURM or user flag)
+NUM_GPUS=${SLURM_GPUS:-1}
+
+# Allow override via CLI --gpus <n>
+for arg in "$@"; do
+    case $arg in
+        --gpus=*)
+            NUM_GPUS="${arg#*=}"
+            shift ;;
+    esac
+done
+
+# Decide launcher (single-process vs torchrun)
+if [ "$NUM_GPUS" -gt 1 ]; then
+    PY_LAUNCHER="srun --mpi=pmi2 torchrun --standalone --nnodes=1 --nproc_per_node=$NUM_GPUS"
+    DISTRIBUTED_FLAG="--mp_distributed=True"
+else
+    PY_LAUNCHER="python"
+    DISTRIBUTED_FLAG="--mp_distributed=False"
+fi
 
 function show_help() {
     echo "Usage: ./script.sh [options]"
@@ -87,6 +110,8 @@ function show_help() {
     echo "  --probe_model           Probe model (default: $PROBE_MODEL)"
     echo "  --n_cls_tokens          Number of classification tokens (default: $N_CLS_TOKENS)"
     echo "  --random          Random seed (default: $TJEPA_RANDOM)"
+    echo "  --load_from_checkpoint  Resume from checkpoint? (default: $LOAD_FROM_CHECKPOINT)"
+    echo "  --load_path             Path to checkpoint .pth file (default: empty)"
     echo "  -h, --help              Show this help message and exit"
 }
 
@@ -273,6 +298,24 @@ while [[ $# -gt 0 ]]; do
             shift
             shift
             ;;
+        --load_from_checkpoint)
+            LOAD_FROM_CHECKPOINT="$2"
+            shift
+            shift
+            ;;
+        --load_from_checkpoint=*)
+            LOAD_FROM_CHECKPOINT="${1#*=}"
+            shift
+            ;;
+        --load_path)
+            LOAD_PATH="$2"
+            shift
+            shift
+            ;;
+        --load_path=*)
+            LOAD_PATH="${1#*=}"
+            shift
+            ;;
         --n_cls_tokens)
             N_CLS_TOKENS="$2"
             shift
@@ -294,7 +337,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-COMMAND="python run.py \
+COMMAND="${PY_LAUNCHER} run.py \
     --batch_size=$BATCH_SIZE \
     --data_path=$DATA_PATH \
     --data_set=$DATA_SET \
@@ -331,7 +374,12 @@ COMMAND="python run.py \
     --pred_type=$PRED_TYPE \
     --probe_cadence=$PROBE_CADENCE \
     --probe_model=$PROBE_MODEL \
-    --n_cls_tokens=$N_CLS_TOKENS"
+    --n_cls_tokens=$N_CLS_TOKENS \
+    --load_from_checkpoint=$LOAD_FROM_CHECKPOINT \
+    --load_path=$LOAD_PATH"
+
+# Append distributed flag
+COMMAND="$COMMAND $DISTRIBUTED_FLAG"
 
 if [ "$TJEPA_RANDOM" = true ]; then
     COMMAND="$COMMAND --random=True"

@@ -375,11 +375,19 @@ class EarlyStopCounter:
         save_pth=None,
     ):
 
+        # Unwrap DistributedDataParallel if necessary
+        def unwrap(mod):
+            return mod.module if hasattr(mod, "module") else mod
+
+        context_to_save = unwrap(context_encoder).state_dict()
+        target_to_save = unwrap(target_encoder).state_dict()
+        predictor_to_save = unwrap(predictor).state_dict_()  # custom
+
         checkpoint_dict = {
             "epoch": epoch,
-            "context_encoder": context_encoder.state_dict(),
-            "target_encoder": target_encoder.state_dict(),
-            "predictor": predictor.state_dict_(),  # custom
+            "context_encoder": context_to_save,
+            "target_encoder": target_to_save,
+            "predictor": predictor_to_save,
             "optimizer": optimizer.state_dict(),
             "scaler": scaler.state_dict(),
             "scheduler": scheduler.state_dict(),
@@ -433,10 +441,20 @@ class EarlyStopCounter:
 
         print("Load %s" % load_pth)
         state_dict = torch.load(load_pth, map_location=self.device)
-        context_encoder.load_state_dict(state_dict["context_encoder"])
-        target_encoder.load_state_dict(state_dict["target_encoder"])
+        # Unwrap for loading
+        def load_component(component, saved_state):
+            if hasattr(component, "module"):
+                component.module.load_state_dict(saved_state)
+            else:
+                component.load_state_dict(saved_state)
 
-        predictor.load_state_dict_(state_dict["predictor"])
+        load_component(context_encoder, state_dict["context_encoder"])
+        load_component(target_encoder, state_dict["target_encoder"])
+
+        if hasattr(predictor, "module"):
+            predictor.module.load_state_dict_(state_dict["predictor"])
+        else:
+            predictor.load_state_dict_(state_dict["predictor"])
         optimizer.load_state_dict(state_dict["optimizer"])
         scaler.load_state_dict(state_dict["scaler"])
         scheduler.load_state_dict(state_dict["scheduler"])
@@ -462,7 +480,6 @@ class EarlyStopCounter:
             scaler,
             scheduler,
             weightdecay_scheduler,
-            start_epoch,
         )
 
     def get_job_name(self):
