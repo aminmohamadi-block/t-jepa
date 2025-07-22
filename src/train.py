@@ -109,6 +109,11 @@ class Trainer:
         print(f"[Debug] is_main_process={self.is_main_process}", flush=True)
 
         self.job_name = self.early_stop_counter.get_job_name()
+        # Add tag to job name for MLflow run name if provided
+        if hasattr(args, 'tag') and args.tag and args.tag.strip():
+            self.mlflow_run_name = f"{self.job_name}-{args.tag.strip()}"
+        else:
+            self.mlflow_run_name = self.job_name
         self.training_is_over = False
 
         if self.is_main_process:
@@ -185,7 +190,7 @@ class Trainer:
         # dummy context to keep the control-flow uniform while preventing nested
         # or duplicated MLflow runs when training with multiple GPUs.
         run_context = (
-            mlflow.start_run(run_name=self.job_name)
+            mlflow.start_run(run_name=self.mlflow_run_name)
             if self.is_main_process
             else contextlib.nullcontext()
         )
@@ -464,15 +469,15 @@ class Trainer:
 
                             # Log gradient statistics with MLflow (mean and std)
                             grad_metrics = {
-                                "context_encoder_grad_mean": float(np.mean(ctx_grads)) if ctx_grads.size > 0 else 0.0,
-                                "context_encoder_grad_l2": float(np.linalg.norm(ctx_grads)) if ctx_grads.size > 0 else 0.0,
-                                "context_encoder_grad_std": float(np.std(ctx_grads)) if ctx_grads.size > 0 else 0.0,
-                                "target_encoder_grad_mean": float(np.mean(trgt_grads)) if trgt_grads.size > 0 else 0.0,
-                                "target_encoder_grad_l2": float(np.linalg.norm(trgt_grads)) if trgt_grads.size > 0 else 0.0,
-                                "target_encoder_grad_std": float(np.std(trgt_grads)) if trgt_grads.size > 0 else 0.0,
-                                "predictor_grad_mean": float(np.mean(pred_grads)) if pred_grads.size > 0 else 0.0,
-                                "predictor_grad_l2": float(np.linalg.norm(pred_grads)) if pred_grads.size > 0 else 0.0,
-                                "predictor_grad_std": float(np.std(pred_grads)) if pred_grads.size > 0 else 0.0,
+                                "grad/context_encoder_grad_mean": float(np.mean(ctx_grads)) if ctx_grads.size > 0 else 0.0,
+                                "grad/context_encoder_grad_l2": float(np.linalg.norm(ctx_grads)) if ctx_grads.size > 0 else 0.0,
+                                "grad/context_encoder_grad_std": float(np.std(ctx_grads)) if ctx_grads.size > 0 else 0.0,
+                                "grad/target_encoder_grad_mean": float(np.mean(trgt_grads)) if trgt_grads.size > 0 else 0.0,
+                                "grad/target_encoder_grad_l2": float(np.linalg.norm(trgt_grads)) if trgt_grads.size > 0 else 0.0,
+                                "grad/target_encoder_grad_std": float(np.std(trgt_grads)) if trgt_grads.size > 0 else 0.0,
+                                "grad/predictor_grad_mean": float(np.mean(pred_grads)) if pred_grads.size > 0 else 0.0,
+                                "grad/predictor_grad_l2": float(np.linalg.norm(pred_grads)) if pred_grads.size > 0 else 0.0,
+                                "grad/predictor_grad_std": float(np.std(pred_grads)) if pred_grads.size > 0 else 0.0,
                             }
                             if self.is_main_process:
                                 mlflow.log_metrics(
@@ -483,7 +488,7 @@ class Trainer:
                         self.optimizer.zero_grad()
                         if self.is_main_process and self.log_tb:
                             self.writer.add_scalar(
-                                f"Train/loss", loss_value.item(), itr * (self.epoch + 1)
+                                f"train/loss", loss_value.item(), itr * (self.epoch + 1)
                             )
                         total_loss += loss_value
 
@@ -522,16 +527,20 @@ class Trainer:
                 }
 
                 log_dict = {
-                    "tjepa_train_loss": total_loss.item(),
-                    "tjepa_epoch": self.epoch,
-                    "tjepa_time": total_epoch_time,
-                    "tjepa_lr": self.scheduler.get_last_lr()[0],
-                    "tjepa_momentum": m,
-                    "tjepa_weight_decay": self.weight_decay_scheduler.get_last_wd()[0],
-                    "linear_probe_metric": linear_probe_metric,
+                    "train/loss": total_loss.item(),
+                    "train/epoch": self.epoch,
+                    "sys/time_per_epoch": total_epoch_time,
+                    "train/lr": self.scheduler.get_last_lr()[0],
+                    "train/momentum": m,
+                    "train/weight_decay": self.weight_decay_scheduler.get_last_wd()[0],
+                    "val/linear_probe_metric": linear_probe_metric,
                 }
                 if collapse_metrics is not None:
-                    log_dict.update(collapse_metrics)
+                    # Add validation prefix to collapse metrics
+                    collapse_metrics_prefixed = {
+                        f"val/{k}": v for k, v in collapse_metrics.items()
+                    }
+                    log_dict.update(collapse_metrics_prefixed)
 
                 # MLflow expects scalar metrics; filter and cast appropriately
                 if self.is_main_process:
