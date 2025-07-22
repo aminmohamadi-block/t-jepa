@@ -109,11 +109,6 @@ class Trainer:
         print(f"[Debug] is_main_process={self.is_main_process}", flush=True)
 
         self.job_name = self.early_stop_counter.get_job_name()
-        # Add tag to job name for MLflow run name if provided
-        if hasattr(args, 'tag') and args.tag and args.tag.strip():
-            self.mlflow_run_name = f"{self.job_name}-{args.tag.strip()}"
-        else:
-            self.mlflow_run_name = self.job_name
         self.training_is_over = False
 
         if self.is_main_process:
@@ -190,7 +185,7 @@ class Trainer:
         # dummy context to keep the control-flow uniform while preventing nested
         # or duplicated MLflow runs when training with multiple GPUs.
         run_context = (
-            mlflow.start_run(run_name=self.mlflow_run_name)
+            mlflow.start_run(run_name=self.job_name)
             if self.is_main_process
             else contextlib.nullcontext()
         )
