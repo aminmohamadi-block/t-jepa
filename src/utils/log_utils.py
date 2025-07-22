@@ -10,8 +10,7 @@ def make_job_name(args):
         "{dataset}__model_nlyrs_{n_layers}_nheads_{n_heads}_hdim_{hdim}"
         "__pred_ovrlap_{overlap}_npreds_{n_mask_preds}_"
         "_nlyrs_{n_pred_layers}_activ_{activation}"
-        "nenc_{n_mask_ctx}_inter_ctx_{min_ctx_share}_{max_ctx_share}"
-        "_inter_trgt_{min_tgrt_share}_{max_tgrt_share}"
+        "nenc_{n_mask_ctx}"
         "__lr_{lr}_start_{start_lr}_final_{final_lr}_{datetime}"
     )
     job_name = job_name.format(
@@ -24,15 +23,13 @@ def make_job_name(args):
         n_pred_layers=args.pred_num_layers,
         activation=args.pred_activation,
         n_mask_ctx=args.mask_num_encs,
-        min_ctx_share=args.mask_min_ctx_share,
-        max_ctx_share=args.mask_max_ctx_share,
-        min_tgrt_share=args.mask_min_trgt_share,
-        max_tgrt_share=args.mask_max_trgt_share,
         lr=args.exp_lr,
         start_lr=args.exp_start_lr,
         final_lr=args.exp_final_lr,
         datetime=datetime.datetime.now().strftime("%Y%m%d_%H%M%S"),
     )
+    if hasattr(args, 'tag') and args.tag and args.tag.strip():
+        job_name = f"{args.tag.strip()}-{job_name}"
     return job_name
 
 
