@@ -7,11 +7,11 @@ import numpy as np
 import pytorch_lightning as pl
 import torch
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
+from pytorch_lightning.loggers import TensorBoardLogger, MLFlowLogger
+import mlflow
 from tabulate import tabulate
 from torchinfo import summary
 
-import wandb
 from src.benchmark.benchmark_configs import build_parser
 from src.benchmark.utils import MODEL_NAME_TO_MODEL_MAP, get_loss_from_task
 from src.datasets.dict_to_data import DATASET_NAME_TO_DATASET_MAP
@@ -110,31 +110,35 @@ def train_benchmark_model(args, model_args, profile_name: str):
 def set_callbacks_loggers(args: dict):
     callbacks = [
         ModelCheckpoint(
-            monitor=f"{args["data_set"]}_val_loss",
+            monitor=f"{args['data_set']}_val_loss",
             mode="min",
             save_top_k=1,
             dirpath="checkpoints/",
             filename="model-{epoch:02d}-{val_loss:.2f}",
         ),
         EarlyStopping(
-            monitor=f"{args["data_set"]}_val_loss",
+            monitor=f"{args['data_set']}_val_loss",
             patience=args["exp_patience"],
             mode="min",
         ),
     ]
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    current_tracking_uri = mlflow.get_tracking_uri()
+    # Get the experiment name that was created before
+    current_experiment_name = mlflow.get_experiment(mlflow.active_run().info.experiment_id).name if mlflow.active_run() else None
     loggers = [
-        WandbLogger(
+        MLFlowLogger(tracking_uri=current_tracking_uri, experiment_name=current_experiment_name),
+        TensorBoardLogger(
+            "lightning_logs",
             name="t-jepa-2",
-            project="t-jepa-2",
-            log_model=False,
-            log_graph=False,
-            save_code=False,
+            version=f"{args['model_name']}_{timestamp}",
         ),
-        TensorBoardLogger("lightning_logs", name="t-jepa-2", version=f"{args['model_name']}_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}"),
     ]
 
     return callbacks, loggers
 
+
+# TODO: Update MLFlow
 
 if __name__ == "__main__":
 
@@ -142,10 +146,25 @@ if __name__ == "__main__":
     args, _ = a.parse_known_args()
     model_args, _ = model_args.parse_known_args()
 
-    profile_name = f'profile_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}.prof' 
-    wandb.init(project="t-jepa", reinit=True, name=f"{args.model_name}_{args.data_set}_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}", config=args)
+    profile_name = f'profile_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}.prof'
 
-    val_metrics, test_metrics, args = train_benchmark_model(args, model_args, profile_name) 
+    mlflow.set_experiment("t-jepa")
+    run_name = f"{args.model_name}_{args.data_set}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    mlflow.start_run(run_name=run_name)
+
+    # Log input arguments
+    mlflow.log_params({k: (v if isinstance(v, (int, float, bool, str)) else str(v)) for k, v in vars(args).items()})
+
+    val_metrics, test_metrics, args = train_benchmark_model(args, model_args, profile_name)
+
+    # Log evaluation metrics (use test metrics primarily)
+    if isinstance(test_metrics, list) and len(test_metrics) > 0:
+        for metric_dict in test_metrics:
+            for k, v in metric_dict.items():
+                if isinstance(v, (int, float)):
+                    mlflow.log_metric(k, v)
+
+    mlflow.end_run()
 
     import pstats
     from pstats import SortKey
