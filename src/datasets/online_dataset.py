@@ -65,7 +65,10 @@ class OnlineDataset(BaseDataset):
         self.num_features = self.dataset.num_features
         self.is_data_loaded = True
 
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        # Place the temporary TorchDataset and its batches on **the same device**
+        # as the frozen encoder. This avoids device-mismatch errors when each
+        # distributed rank runs on a different GPU.
+        device = next(self.encoder.parameters()).device
         train_torchdataset = TorchDataset(
             dataset=self.dataset,
             mode="train",

@@ -19,35 +19,46 @@ def init_optim(
     use_wd_scheduler=True,
 ):
 
-    if isinstance(predictors.predictors, list):
+    # Allow for DistributedDataParallel-wrapped modules
+    if hasattr(predictors, "module"):
+        predictors_inner = predictors.module  # type: ignore[attr-defined]
+    else:
+        predictors_inner = predictors
+
+    if hasattr(context_encoder, "module"):
+        context_inner = context_encoder.module  # type: ignore[attr-defined]
+    else:
+        context_inner = context_encoder
+
+    if isinstance(predictors_inner.predictors, list):
         predictor_params1 = (
             p
-            for pred in predictors.predictors
+            for pred in predictors_inner.predictors
             for n, p in pred.named_parameters()
             if ("bias" not in n) and (len(p.shape) != 1)
         )
         predictor_params2 = (
             p
-            for pred in predictors.predictors
+            for pred in predictors_inner.predictors
             for n, p in pred.named_parameters()
             if ("bias" in n) or (len(p.shape) == 1)
         )
     else:
         predictor_params1 = (
             p
-            for n, p in predictors.predictors.named_parameters()
+            for n, p in predictors_inner.predictors.named_parameters()
             if ("bias" not in n) and (len(p.shape) != 1)
         )
         predictor_params2 = (
             p
-            for n, p in predictors.predictors.named_parameters()
+            for n, p in predictors_inner.predictors.named_parameters()
             if ("bias" in n) or (len(p.shape) == 1)
         )
     param_groups = [
         {
             "params": (
                 p
-                for n, p in context_encoder.named_parameters()
+                for n, p in context_inner.named_parameters()
                 if ("bias" not in n) and (len(p.shape) != 1)
             )
         },
@@ -55,7 +66,7 @@ def init_optim(
         {
             "params": (
                 p
-                for n, p in context_encoder.named_parameters()
+                for n, p in context_inner.named_parameters()
                 if ("bias" in n) or (len(p.shape) == 1)
             ),
             "WD_exclude": True,

@@ -4,12 +4,14 @@ import torchvision
 import pytorch_lightning as pl
 import os
 from datetime import datetime
+import contextlib  # Added for nullcontext when not main process
 
 import numpy as np
 from tabulate import tabulate
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.distributed as dist
 from torch.utils.tensorboard import SummaryWriter
 from torchinfo import summary
 
@@ -104,6 +106,8 @@ class Trainer:
             not self.is_distributed
         )
 
+        print(f"[Debug] is_main_process={self.is_main_process}", flush=True)
+
         self.job_name = self.early_stop_counter.get_job_name()
         self.training_is_over = False
 
@@ -177,8 +181,18 @@ class Trainer:
             self.args.mock = True
 
         # Initialize MLflow experiment and log parameters
-        with mlflow.start_run(run_name=self.job_name):
-            mlflow.log_params(self.mlflow_params)
+        # Only the main process should create an MLflow run. Other processes enter a
+        # dummy context to keep the control-flow uniform while preventing nested
+        # or duplicated MLflow runs when training with multiple GPUs.
+        run_context = (
+            mlflow.start_run(run_name=self.job_name)
+            if self.is_main_process
+            else contextlib.nullcontext()
+        )
+
+        with run_context:
+            if self.is_main_process:
+                mlflow.log_params(self.mlflow_params)
 
             while self.epoch < self.num_epoch:
                 collapse_metrics = None
@@ -240,10 +254,13 @@ class Trainer:
                         nrow=2,
                     )
 
-                    # Log the image grid as an artifact with MLflow
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpfile:
-                        torchvision.utils.save_image(img_grid, tmpfile.name)
-                        mlflow.log_artifact(tmpfile.name, artifact_path="embedding_images")
+                    # Log the image grid as an artifact with MLflow (main process only)
+                    if self.is_main_process:
+                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpfile:
+                            torchvision.utils.save_image(img_grid, tmpfile.name)
+                            mlflow.log_artifact(
+                                tmpfile.name, artifact_path="embedding_images"
+                            )
 
                     collapse_metrics = {
                         "KL": [],
@@ -350,7 +367,11 @@ class Trainer:
                     print(f"{to_print:#^80}")
 
                 if self.is_distributed:
-                    self.dataloader.set_epoch(self.epoch)
+                    # Ensure shuffling is synchronized across epochs.
+                    if hasattr(self.dataloader, "sampler") and hasattr(self.dataloader.sampler, "set_epoch"):
+                        self.dataloader.sampler.set_epoch(self.epoch)
+                    elif hasattr(self.dataloader, "set_epoch"):
+                        self.dataloader.set_epoch(self.epoch)
                 total_loss = torch.zeros(1, device=self.device)
 
                 for itr, (batch, masks_enc, masks_pred) in enumerate(tqdm(self.dataloader)):
@@ -388,7 +409,14 @@ class Trainer:
                             _debug_values(z[0].T, "z[0] after predictors")
                             loss = self.loss_fn(z, h)
 
-                        loss = AllReduce.apply(loss)
+                        # Synchronise gradients via DDP; we only need to
+                        # reduce the loss tensor for logging/metrics.
+                        loss_value = loss.detach()
+                        if self.is_distributed:
+                            dist.all_reduce(loss_value, op=dist.ReduceOp.SUM)
+                            loss_value = loss_value / self.world_size
+                        else:
+                            loss_value = loss_value
 
                         if self.args.model_amp:
                             self.scaler.scale(loss).backward()
@@ -437,20 +465,27 @@ class Trainer:
                             # Log gradient statistics with MLflow (mean and std)
                             grad_metrics = {
                                 "context_encoder_grad_mean": float(np.mean(ctx_grads)) if ctx_grads.size > 0 else 0.0,
+                                "context_encoder_grad_l2": float(np.linalg.norm(ctx_grads)) if ctx_grads.size > 0 else 0.0,
                                 "context_encoder_grad_std": float(np.std(ctx_grads)) if ctx_grads.size > 0 else 0.0,
                                 "target_encoder_grad_mean": float(np.mean(trgt_grads)) if trgt_grads.size > 0 else 0.0,
+                                "target_encoder_grad_l2": float(np.linalg.norm(trgt_grads)) if trgt_grads.size > 0 else 0.0,
                                 "target_encoder_grad_std": float(np.std(trgt_grads)) if trgt_grads.size > 0 else 0.0,
                                 "predictor_grad_mean": float(np.mean(pred_grads)) if pred_grads.size > 0 else 0.0,
+                                "predictor_grad_l2": float(np.linalg.norm(pred_grads)) if pred_grads.size > 0 else 0.0,
                                 "predictor_grad_std": float(np.std(pred_grads)) if pred_grads.size > 0 else 0.0,
                             }
-                            mlflow.log_metrics(grad_metrics, step=itr + self.epoch * len(self.dataloader))
+                            if self.is_main_process:
+                                mlflow.log_metrics(
+                                    grad_metrics,
+                                    step=itr + self.epoch * len(self.dataloader),
+                                )
 
                         self.optimizer.zero_grad()
                         if self.is_main_process and self.log_tb:
                             self.writer.add_scalar(
-                                f"Train/loss", loss.item(), itr * (self.epoch + 1)
+                                f"Train/loss", loss_value.item(), itr * (self.epoch + 1)
                             )
-                        total_loss += loss
+                        total_loss += loss_value
 
                         # Step 3. momentum update of target encoder
                         with torch.no_grad():
@@ -499,8 +534,11 @@ class Trainer:
                     log_dict.update(collapse_metrics)
 
                 # MLflow expects scalar metrics; filter and cast appropriately
-                mlflow_log_dict = {k: float(v) for k, v in log_dict.items() if np.isscalar(v)}
-                mlflow.log_metrics(mlflow_log_dict, step=self.epoch)
+                if self.is_main_process:
+                    mlflow_log_dict = {
+                        k: float(v) for k, v in log_dict.items() if np.isscalar(v)
+                    }
+                    mlflow.log_metrics(mlflow_log_dict, step=self.epoch)
 
                 (
                     early_stop_signal,
