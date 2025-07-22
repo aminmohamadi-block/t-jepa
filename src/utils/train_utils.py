@@ -272,7 +272,6 @@ def get_distributed_dataloader(
         pin_memory=pin_memory,
         sampler=sampler,
         drop_last=False,
-        persistent_workers=True,
     )
     # (https://discuss.pytorch.org/t/what-are-the-dis-advantages-of-persistent-workers/102110)
 
