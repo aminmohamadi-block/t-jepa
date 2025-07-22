@@ -68,6 +68,12 @@ def build_parser():
     # #### Experiment Config ##################################################
     ###########################################################################
     parser.add_argument(
+        "--tag",
+        type=str,
+        default="",
+        help="Optional tag to append to MLflow experiment name.",
+    )
+    parser.add_argument(
         "--test",
         type="bool",
         default=False,

@@ -46,6 +46,7 @@ TJEPA_RANDOM=false
 N_CLS_TOKENS=1
 LOAD_FROM_CHECKPOINT=False
 LOAD_PATH=""
+TAG=""
 
 # Detect number of GPUs requested (from SLURM or user flag)
 NUM_GPUS=${SLURM_GPUS:-1}
@@ -112,6 +113,7 @@ function show_help() {
     echo "  --random          Random seed (default: $TJEPA_RANDOM)"
     echo "  --load_from_checkpoint  Resume from checkpoint? (default: $LOAD_FROM_CHECKPOINT)"
     echo "  --load_path             Path to checkpoint .pth file (default: empty)"
+    echo "  --tag                   Optional tag for MLflow experiment name (default: empty)"
     echo "  -h, --help              Show this help message and exit"
 }
 
@@ -325,6 +327,11 @@ while [[ $# -gt 0 ]]; do
             TJEPA_RANDOM=true
             shift
             ;;
+        --tag)
+            TAG="$2"
+            shift
+            shift
+            ;;
         -h|--help)
             show_help
             exit 0
@@ -377,6 +384,11 @@ COMMAND="${PY_LAUNCHER} run.py \
     --n_cls_tokens=$N_CLS_TOKENS \
     --load_from_checkpoint=$LOAD_FROM_CHECKPOINT \
     --load_path=$LOAD_PATH"
+
+# Add tag if provided
+if [ -n "$TAG" ]; then
+    COMMAND="$COMMAND --tag=$TAG"
+fi
 
 # Append distributed flag
 COMMAND="$COMMAND $DISTRIBUTED_FLAG"

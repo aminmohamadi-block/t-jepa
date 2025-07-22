@@ -342,9 +342,6 @@ def setup_mlflow_logging() -> None:
     
     Configures Databricks MLflow integration with proper authentication
     and experiment organization.
-    
-    Args:
-        config_dict: Configuration dictionary containing run settings
     """
     try:
         import mlflow
@@ -364,7 +361,7 @@ def setup_mlflow_logging() -> None:
         # Configure MLflow
         mlflow.set_tracking_uri(uri="databricks")
         
-        # Set experiment
+        # Set experiment (fixed project name)
         project_name = "t-jepa-test"
         mlflow.set_experiment(f"/groups/block-aird-team/{project_name}")
         
