@@ -200,6 +200,7 @@ class Trainer:
             while self.epoch < self.num_epoch:
                 collapse_metrics = None
                 linear_probe_metric = 0
+                probe_val_metrics = {}
                 if self.probe_cadence > 0 and self.epoch % self.probe_cadence == 0:
                     print(f"Running probe at epoch {self.epoch}")
 
@@ -349,20 +350,54 @@ class Trainer:
                     summary(model, input_size=model_args.summary_input)
                     model = model.float()
 
-                    callbacks, loggers = set_callbacks_loggers(dataset_args)
+                    # Create a descriptive run name for the linear probe
+                    probe_run_name = f"{self.job_name}_epoch_{self.epoch}_probe"
+
+                    # Gather all relevant parameters for logging
+                    probe_run_params = {
+                        **dataset_args,
+                        "parent_run_name": self.job_name,
+                        "parent_epoch": self.epoch,
+                    }
+
+                    callbacks, loggers = set_callbacks_loggers(
+                        dataset_args, run_name=probe_run_name, run_params=probe_run_params
+                    )
 
                     trainer = pl.Trainer(
                         max_epochs=dataset_args["exp_train_total_epochs"],
                         logger=loggers,
                         callbacks=callbacks,
                         log_every_n_steps=10,
+                        strategy="ddp",
+                        devices=-1,
                     )
 
                     trainer.fit(model, datamodule=datamodule)
-                    val_metrics = trainer.validate(model, datamodule=datamodule)
-                    trainer.test(model, datamodule=datamodule)
 
-                    linear_probe_metric = val_metrics[0][f"{self.args.data_set}_val_score"]
+                    # ALL ranks must participate in validation and testing to avoid deadlocks.
+                    val_metrics_list = trainer.validate(model, datamodule=datamodule)
+                    trainer.test(model, datamodule=datamodule)
+                    
+                    # Only process and log metrics on the main rank
+                    if self.is_main_process:
+                        linear_probe_metric = val_metrics_list[0][
+                            f"{self.args.data_set}_val_score"
+                        ]
+                        # Add a prefix to all probe validation metrics for clarity in the main run
+                        probe_val_metrics = {f"probe/{k}": v for k, v in val_metrics_list[0].items()}
+                    
+                    # Broadcast the metric from the main process to all other processes.
+                    # First, create a tensor on the correct device for all processes.
+                    metric_tensor = torch.tensor(linear_probe_metric if self.is_main_process else 0.0, device=self.device)
+                    if self.is_distributed:
+                        dist.broadcast(metric_tensor, src=0)
+                    linear_probe_metric = metric_tensor.item()
+
+                    # Add a barrier to ensure all processes sync up before continuing.
+                    if self.is_distributed:
+                        dist.barrier()
+
 
                 start_time = datetime.now()
                 to_print = f"Training epoch: {self.epoch+1}/{self.num_epoch}"
@@ -387,7 +422,7 @@ class Trainer:
                         mask.to(self.device, non_blocking=True) for mask in masks_pred
                     ]
 
-                    with torch.amp.autocast(enabled=self.args.model_amp):
+                    with torch.autocast(device_type=self.device.type, enabled=self.args.model_amp):
                         # target forward
                         with torch.no_grad():
                             _debug_values(batch[0].T, "batch[0]")
@@ -539,6 +574,7 @@ class Trainer:
 
                 # MLflow expects scalar metrics; filter and cast appropriately
                 if self.is_main_process:
+                    log_dict.update(probe_val_metrics)
                     mlflow_log_dict = {
                         k: float(v) for k, v in log_dict.items() if np.isscalar(v)
                     }
