@@ -2,7 +2,7 @@
 #SBATCH --job-name=test_tjepa_jannis_default_1a100_resume
 #SBATCH --partition=a100
 #SBATCH --gpus=4
-#SBATCH --cpus-per-task=24
+#SBATCH --cpus-per-task=32
 #SBATCH --mem=256G
 #SBATCH --time=12:00:00 
 

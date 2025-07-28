@@ -1,4 +1,9 @@
 import datetime
+import socket
+import platform
+import psutil
+import subprocess
+import os
 
 import torch
 
@@ -163,3 +168,60 @@ def _debug_values(data: torch.Tensor, title="Data", skip=False):
                 )
     plt.title(title)
     plt.show()
+
+
+def get_system_metrics():
+    """Collect comprehensive system metrics for MLflow logging."""
+    metrics = {}
+    
+    # Basic system info
+    metrics['sys/hostname'] = socket.gethostname()
+    metrics['sys/platform'] = platform.platform()
+    metrics['sys/python_version'] = platform.python_version()
+    
+    # CPU info
+    metrics['sys/cpu_count'] = psutil.cpu_count()
+    metrics['sys/cpu_count_logical'] = psutil.cpu_count(logical=True)
+    metrics['sys/cpu_count_physical'] = psutil.cpu_count(logical=False)
+    
+    # Memory info (in GB)
+    memory = psutil.virtual_memory()
+    metrics['sys/memory_total_gb'] = memory.total / (1024**3)
+    metrics['sys/memory_available_gb'] = memory.available / (1024**3)
+    metrics['sys/memory_percent'] = memory.percent
+    
+    # GPU info
+    if torch.cuda.is_available():
+        metrics['sys/gpu_count'] = torch.cuda.device_count()
+        metrics['sys/cuda_version'] = torch.version.cuda
+        
+        # Per-GPU memory info
+        for i in range(torch.cuda.device_count()):
+            gpu_name = torch.cuda.get_device_name(i)
+            gpu_memory = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+            metrics[f'sys/gpu_{i}_name'] = gpu_name
+            metrics[f'sys/gpu_{i}_memory_gb'] = gpu_memory
+    else:
+        metrics['sys/gpu_count'] = 0
+        metrics['sys/cuda_version'] = 'N/A'
+    
+    # SLURM info (if available)
+    slurm_vars = [
+        'SLURM_JOB_ID', 'SLURM_JOB_NAME', 'SLURM_GPUS', 'SLURM_CPUS_PER_TASK',
+        'SLURM_MEM_PER_NODE', 'SLURM_NNODES', 'SLURM_NTASKS', 'SLURM_PARTITION'
+    ]
+    for var in slurm_vars:
+        value = os.environ.get(var)
+        if value:
+            metrics[f'slurm/{var.lower()}'] = value
+    
+    # PyTorch info
+    metrics['sys/pytorch_version'] = torch.__version__
+    
+    # Distributed training info
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        metrics['sys/world_size'] = torch.distributed.get_world_size()
+        metrics['sys/rank'] = torch.distributed.get_rank()
+        metrics['sys/backend'] = torch.distributed.get_backend()
+        
+    return metrics
