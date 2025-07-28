@@ -17,6 +17,7 @@ from src.benchmark.utils import MODEL_NAME_TO_MODEL_MAP, get_loss_from_task
 from src.datasets.dict_to_data import DATASET_NAME_TO_DATASET_MAP
 from src.torch_dataset import DataModule
 from src.utils.models_utils import BaseModel
+from src.utils.log_utils import get_system_metrics
 
 
 def train_benchmark_model(args, model_args, profile_name: str):
@@ -107,7 +108,17 @@ def train_benchmark_model(args, model_args, profile_name: str):
     return val_metrics, test_metrics, args
 
 
-def set_callbacks_loggers(args: dict):
+def set_callbacks_loggers(args: dict, run_name: str = None, run_params: dict = None):
+    """
+    Setup callbacks and loggers for pytorch-lightning Trainer.
+    It will setup:
+        - EarlyStopping
+        - ModelCheckpoint
+        - TensorBoardLogger
+    """
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    # We can't know which metric to monitor, so we'll use a generic one
+    # and hope it's available
     callbacks = [
         ModelCheckpoint(
             monitor=f"{args['data_set']}_val_loss",
@@ -122,18 +133,42 @@ def set_callbacks_loggers(args: dict):
             mode="min",
         ),
     ]
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
     current_tracking_uri = mlflow.get_tracking_uri()
     # Get the experiment name that was created before
-    current_experiment_name = mlflow.get_experiment(mlflow.active_run().info.experiment_id).name if mlflow.active_run() else None
+    current_experiment = (
+        mlflow.get_experiment(mlflow.active_run().info.experiment_id)
+        if mlflow.active_run()
+        else None
+    )
+    current_experiment_name = current_experiment.name if current_experiment else None
+
+    # If a run_name is provided, use it, otherwise create a default one
+    if run_name is None:
+        run_name = f"{args['model_name']}_{timestamp}"
+
+    mlf_logger = MLFlowLogger(
+        tracking_uri=current_tracking_uri,
+        experiment_name=current_experiment_name,
+        run_name=run_name,
+    )
+
     loggers = [
-        MLFlowLogger(tracking_uri=current_tracking_uri, experiment_name=current_experiment_name),
+        mlf_logger,
         TensorBoardLogger(
             "lightning_logs",
             name="t-jepa-2",
             version=f"{args['model_name']}_{timestamp}",
         ),
     ]
+
+    # If parameters are provided, log them.
+    # We need to access the underlying experiment object to log params to the correct run.
+    if run_params:
+        mlf_logger.log_hyperparams(run_params)
+        # Also log system metrics for completeness
+        system_metrics = get_system_metrics()
+        mlf_logger.log_hyperparams(system_metrics)
 
     return callbacks, loggers
 
