@@ -23,7 +23,7 @@ from src.benchmark.utils import (
 )
 from src.datasets.online_dataset import OnlineDataset, OnlineDatasetArgs
 from src.torch_dataset import DataModule, TorchDataset
-from src.utils.log_utils import _debug_values, make_job_name
+from src.utils.log_utils import _debug_values, make_job_name, get_system_metrics
 from src.utils.checkpointer import EarlyStopSignal, MODEL_CP_NAME
 from src.utils.models_utils import BaseModel
 from src.utils.train_utils import (
@@ -185,14 +185,17 @@ class Trainer:
         # dummy context to keep the control-flow uniform while preventing nested
         # or duplicated MLflow runs when training with multiple GPUs.
         run_context = (
-            mlflow.start_run(run_name=self.job_name)
+            mlflow.start_run(run_name=self.job_name, log_system_metrics=True)
             if self.is_main_process
             else contextlib.nullcontext()
         )
 
         with run_context:
+            
             if self.is_main_process:
+                system_metrics = get_system_metrics()
                 mlflow.log_params(self.mlflow_params)
+                mlflow.log_params(system_metrics)
 
             while self.epoch < self.num_epoch:
                 collapse_metrics = None
@@ -384,7 +387,7 @@ class Trainer:
                         mask.to(self.device, non_blocking=True) for mask in masks_pred
                     ]
 
-                    with torch.cuda.amp.autocast(enabled=self.args.model_amp):
+                    with torch.amp.autocast(enabled=self.args.model_amp):
                         # target forward
                         with torch.no_grad():
                             _debug_values(batch[0].T, "batch[0]")
@@ -413,10 +416,7 @@ class Trainer:
                         # reduce the loss tensor for logging/metrics.
                         loss_value = loss.detach()
                         if self.is_distributed:
-                            dist.all_reduce(loss_value, op=dist.ReduceOp.SUM)
-                            loss_value = loss_value / self.world_size
-                        else:
-                            loss_value = loss_value
+                            dist.all_reduce(loss_value, op=dist.ReduceOp.AVG)
 
                         if self.args.model_amp:
                             self.scaler.scale(loss).backward()

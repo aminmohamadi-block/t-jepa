@@ -45,6 +45,8 @@ def main(args):
             )
         )
 
+        torch.cuda.set_device(idr_torch.local_rank)
+
         # Initialize the default process group
         dist.init_process_group(
             backend="nccl",
@@ -228,8 +230,11 @@ def main(args):
 
     if args.mp_distributed:
         # Use a DistributedSampler-backed DataLoader so that each rank gets a shard
+        # Divide batch size by world size to maintain consistent effective batch size
+        per_gpu_batch_size = args.batch_size // distributed_args["world_size"]
+        print(f"[Debug] Per-GPU batch size: {per_gpu_batch_size}, Total effective batch size: {args.batch_size}")
         dataloader = get_distributed_dataloader(
-            batchsize=args.batch_size,
+            batchsize=per_gpu_batch_size,
             dataset=train_torchdataset,
             distributed_args=cast(dict, distributed_args),
             data_loader_nprocs=args.data_loader_nprocs,
