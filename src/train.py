@@ -580,16 +580,31 @@ class Trainer:
                     }
                     mlflow.log_metrics(mlflow_log_dict, step=self.epoch)
 
-                (
-                    early_stop_signal,
-                    self.context_encoder,
-                    self.target_encoder,
-                    self.predictors,
-                    self.optimizer,
-                    self.scaler,
-                    self.scheduler,
-                    self.weight_decay_scheduler,
-                ) = self.early_stop_counter.update(**args_early_stop)
+                if self.is_main_process:
+                    (
+                        early_stop_signal,
+                        self.context_encoder,
+                        self.target_encoder,
+                        self.predictors,
+                        self.optimizer,
+                        self.scaler,
+                        self.scheduler,
+                        self.weight_decay_scheduler,
+                    ) = self.early_stop_counter.update(**args_early_stop)
+
+                if self.is_distributed:
+                    # Broadcast the early_stop_signal from the main process to all other processes.
+                    signal_tensor = torch.tensor(
+                        early_stop_signal.value if self.is_main_process else 0,
+                        dtype=torch.int,
+                        device=self.device,
+                    )
+                    dist.broadcast(signal_tensor, src=0)
+
+                    if not self.is_main_process:
+                        early_stop_signal = EarlyStopSignal(signal_tensor.item())
+
+                    dist.barrier()
 
                 if early_stop_signal == EarlyStopSignal.STOP:
                     if not (self.epoch == self.num_epoch):
