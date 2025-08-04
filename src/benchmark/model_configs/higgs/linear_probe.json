@@ -1,5 +1,6 @@
 {
-    "exp_lr": 0.001,
-    "exp_weight_decay": 2e-5,
-    "out_dim": 2
+    "exp_lr": 0.01,
+    "exp_weight_decay": 0.001,
+    "exp_eta_min": 1e-6,
+    "out_dim": 1
 }

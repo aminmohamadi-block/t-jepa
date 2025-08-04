@@ -340,8 +340,20 @@ def main(args):
 
     print("Starting training…", flush=True)
     trainer.train()
+    
+    # Output final validation score for Optuna
+    if hasattr(trainer, 'early_stop_counter') and hasattr(trainer.early_stop_counter, 'best_val_score'):
+        best_score = trainer.early_stop_counter.best_val_score
+        print(f"OPTUNA_SCORE: {best_score}")
+        print(f"Best validation score: {best_score}")
+        
+        # Also save to file for SLURM jobs
+        if hasattr(args, 'optuna_output_dir') and args.optuna_output_dir:
+            score_file = os.path.join(args.optuna_output_dir, f"trial_{args.optuna_trial_number}_score.txt")
+            with open(score_file, 'w') as f:
+                f.write(f"OPTUNA_SCORE: {best_score}\n")
 
-def setup_mlflow_logging() -> None:
+def setup_mlflow_logging(args) -> None:
     """
     Setup MLflow logging for experiment tracking.
     
@@ -366,8 +378,8 @@ def setup_mlflow_logging() -> None:
         # Configure MLflow
         mlflow.set_tracking_uri(uri="databricks")
         
-        # Set experiment (fixed project name)
-        project_name = "t-jepa-test"
+        # Set experiment using provided project name
+        project_name = args.project_name
         mlflow.set_experiment(f"/groups/block-aird-team/{project_name}")
         
         print(f"✓ MLflow logging configured for project: {project_name}")
@@ -379,5 +391,5 @@ def setup_mlflow_logging() -> None:
 if __name__ == "__main__":
     parser = build_parser()
     args = parser.parse_args()
-    setup_mlflow_logging()
+    setup_mlflow_logging(args)
     main(args)

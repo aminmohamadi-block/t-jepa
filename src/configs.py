@@ -74,6 +74,12 @@ def build_parser():
         help="Optional tag to append to MLflow experiment name.",
     )
     parser.add_argument(
+        "--project_name",
+        type=str,
+        default="t-jepa-test",
+        help="MLflow project name for experiment organization.",
+    )
+    parser.add_argument(
         "--test",
         type="bool",
         default=False,
@@ -489,6 +495,29 @@ def build_parser():
         type=int,
         default=1,
         help="Number of context mask per sample.",
+    )
+    
+    ###########################################################################
+    # #### Optuna Config #####################################################
+    ###########################################################################
+    
+    parser.add_argument(
+        "--optuna_study_name",
+        type=str,
+        default=None,
+        help="Optuna study name for hyperparameter tuning.",
+    )
+    parser.add_argument(
+        "--optuna_trial_number",
+        type=int,
+        default=None,
+        help="Optuna trial number for hyperparameter tuning.",
+    )
+    parser.add_argument(
+        "--optuna_output_dir",
+        type=str,
+        default=None,
+        help="Optuna output directory for saving trial results.",
     )
 
     return parser

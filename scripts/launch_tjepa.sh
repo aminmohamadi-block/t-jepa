@@ -47,6 +47,7 @@ N_CLS_TOKENS=1
 LOAD_FROM_CHECKPOINT=False
 LOAD_PATH=""
 TAG=""
+PROJECT_NAME="t-jepa-test"
 
 # Detect number of GPUs requested (from SLURM or user flag)
 NUM_GPUS=${SLURM_GPUS:-1}
@@ -114,6 +115,7 @@ function show_help() {
     echo "  --load_from_checkpoint  Resume from checkpoint? (default: $LOAD_FROM_CHECKPOINT)"
     echo "  --load_path             Path to checkpoint .pth file (default: empty)"
     echo "  --tag                   Optional tag for MLflow experiment name (default: empty)"
+    echo "  --project_name          MLflow project name (default: $PROJECT_NAME)"
     echo "  -h, --help              Show this help message and exit"
 }
 
@@ -332,6 +334,11 @@ while [[ $# -gt 0 ]]; do
             shift
             shift
             ;;
+        --project_name)
+            PROJECT_NAME="$2"
+            shift
+            shift
+            ;;
         -h|--help)
             show_help
             exit 0
@@ -389,6 +396,9 @@ COMMAND="${PY_LAUNCHER} run.py \
 if [ -n "$TAG" ]; then
     COMMAND="$COMMAND --tag=$TAG"
 fi
+
+# Add project name
+COMMAND="$COMMAND --project_name=$PROJECT_NAME"
 
 # Append distributed flag
 COMMAND="$COMMAND $DISTRIBUTED_FLAG"
