@@ -292,10 +292,10 @@ class Trainer:
                             "batch_size": 128,
                             "task_type": online_dataset.task_type,
                             "using_embedding": True,
-                            "exp_train_total_epochs": 50 if not self.args.test else 1,
+                            "exp_train_total_epochs": 200 if not self.args.test else 1,
                             "model_name": self.probe_model,
                             "dataset_name": online_dataset_args.data_set,
-                            "exp_patience": 20,
+                            "exp_patience": 50,
                             "n_cls_tokens": self.args.n_cls_tokens,
                         }
                     )
