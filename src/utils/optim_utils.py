@@ -79,7 +79,7 @@ def init_optim(
     if use_scheduler:
         scheduler = WarmupCosineSchedule(
             optimizer,
-            warmup_steps=int(warmup * iter_per_epoch),
+            warmup_steps=int(warmup * num_epochs * iter_per_epoch),
             start_lr=start_lr,
             ref_lr=ref_lr,
             final_lr=final_lr,

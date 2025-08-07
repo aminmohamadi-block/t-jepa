@@ -1,0 +1,27 @@
+{
+  "total_experiments": 9,
+  "parameter_grid": {
+    "learning_rates": [
+      0.001,
+      0.01,
+      0.1
+    ],
+    "weight_decays": [
+      0.0001,
+      0.001,
+      0.01
+    ]
+  },
+  "successful_experiments": 0,
+  "success_rate": 0.0,
+  "best_accuracy": {
+    "accuracy": 0.6918604373931885,
+    "learning_rate": 0.1,
+    "weight_decay": 0.01,
+    "val_loss": null,
+    "test_precision": 0.6923988461494446,
+    "test_recall": 0.6918604373931885,
+    "test_f1_score": 0.6912215352058411,
+    "test_roc_auc": 0.7600932717323303
+  }
+}
