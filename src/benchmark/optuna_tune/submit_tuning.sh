@@ -24,10 +24,11 @@ PARTITION="a100"
 GPUS=1
 CPUS_PER_TASK=8
 MEM="100G"
-TIME="6:00:00"
+TIME="23:59:00"
 ENV_SETUP=""
 SAMPLER="TPE"
 RESUME=""
+MAX_RETRIES=10
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -80,6 +81,10 @@ while [[ $# -gt 0 ]]; do
             RESUME="--resume"
             shift
             ;;
+        --max_retries)
+            MAX_RETRIES="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
             exit 1
@@ -94,6 +99,19 @@ if [[ -z "$CONFIG" || -z "$PROJECT_NAME" ]]; then
     exit 1
 fi
 
+# Set up output directory and move controller logs there at the end
+OUTPUT_DIR="optuna_results_${PROJECT_NAME}"
+mkdir -p "$OUTPUT_DIR"
+
+# Set up trap to move controller log files to output directory when job ends
+cleanup() {
+    if [[ -n "$SLURM_JOB_ID" ]]; then
+        mv "optuna_controller_${SLURM_JOB_ID}.out" "${OUTPUT_DIR}/" 2>/dev/null || true
+        mv "optuna_controller_${SLURM_JOB_ID}.err" "${OUTPUT_DIR}/" 2>/dev/null || true
+        echo "Controller logs moved to ${OUTPUT_DIR}/"
+    fi
+}
+trap cleanup EXIT
 
 echo "Starting Optuna hyperparameter tuning controller"
 echo "Config: $CONFIG"
@@ -116,6 +134,7 @@ python src/benchmark/optuna_tune/tune_optuna.py \
     --time "$TIME" \
     --env_setup "$ENV_SETUP" \
     --sampler "$SAMPLER" \
+    --max_retries "$MAX_RETRIES" \
     $RESUME
 
 echo "Optuna tuning completed at: $(date)"

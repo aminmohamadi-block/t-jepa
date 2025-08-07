@@ -13,6 +13,7 @@ import subprocess
 import time
 import pandas as pd
 import json
+import glob
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 import re
@@ -56,55 +57,6 @@ def suggest_parameter(trial: optuna.Trial, param_name: str, param_config: Dict[s
         raise ValueError(f"Unknown parameter config format for {param_name}: {param_config}")
 
 
-def create_slurm_script(params: Dict[str, Any], study_name: str, trial_number: int, 
-                       base_slurm_config: Dict[str, str], output_dir: str, project_name: str) -> str:
-    """Create SLURM script for this trial"""
-    
-    script_path = f"{output_dir}/trial_{trial_number}.sh"
-    
-    # Convert parameters to command line arguments (space-separated format)
-    cmd_args = []
-    for param_name, param_value in params.items():
-        cmd_args.extend([f"--{param_name}", str(param_value)])
-    
-    # Add study metadata (only supported arguments)
-    cmd_args.extend([
-        "--tag", f"optuna_trial_{trial_number}",
-        "--project_name", project_name
-    ])
-    
-    script_content = f"""#!/bin/bash
-#SBATCH --job-name={study_name}_trial_{trial_number}
-#SBATCH --partition={base_slurm_config.get('partition', 'a100')}
-#SBATCH --gpus={base_slurm_config.get('gpus', '1')}
-#SBATCH --cpus-per-task={base_slurm_config.get('cpus_per_task', '8')}
-#SBATCH --mem={base_slurm_config.get('mem', '100G')}
-#SBATCH --time={base_slurm_config.get('time', '6:00:00')}
-#SBATCH --output={output_dir}/trial_{trial_number}.out
-#SBATCH --error={output_dir}/trial_{trial_number}.err
-
-# Environment setup
-source ../bin/activate-hermit
-source .venv/bin/activate
-{base_slurm_config.get('env_setup', '')}
-
-# Change to project directory
-cd {os.getcwd()}
-
-# Run T-JEPA training with Optuna parameters
-./scripts/launch_tjepa.sh {' '.join(cmd_args)}
-
-# Signal completion and write final score
-echo "SLURM_JOB_COMPLETION: trial_{trial_number}" >> {output_dir}/completed_trials.log
-"""
-    
-    with open(script_path, 'w') as f:
-        f.write(script_content)
-    
-    # Make executable
-    os.chmod(script_path, 0o755)
-    
-    return script_path
 
 
 def submit_slurm_job(script_path: str) -> Optional[str]:
@@ -160,22 +112,33 @@ def read_trial_result(output_dir: str, trial_number: int) -> float:
 
 class TrialJob:
     """Container for trial job information"""
-    def __init__(self, trial_number: int, job_id: str, params: Dict[str, Any], submit_time: float):
+    def __init__(self, trial_number: int, job_id: str, params: Dict[str, Any], submit_time: float, max_retries: int = 3):
         self.trial_number = trial_number
         self.job_id = job_id
         self.params = params
         self.submit_time = submit_time
         self.score = None
         self.completed = False
+        self.retry_count = 0
+        self.max_retries = max_retries
+        self.preempted = False
+        self.checkpoint_path = None
 
 
 def submit_trial_job(params: Dict[str, Any], study_name: str, trial_number: int,
-                    base_slurm_config: Dict[str, str], output_dir: str, project_name: str) -> Optional[TrialJob]:
+                    base_slurm_config: Dict[str, str], output_dir: str, project_name: str, 
+                    existing_job: Optional[TrialJob] = None, max_retries: int = 3) -> Optional[TrialJob]:
     """Submit a single trial job and return TrialJob object"""
     
-    # Create SLURM script
+    # Check if this is a retry and if we have a checkpoint
+    checkpoint_path = None
+    if existing_job and existing_job.retry_count > 0:
+        data_set = params.get('data_set', 'jannis')  # Default dataset
+        checkpoint_path = find_latest_checkpoint(trial_number, output_dir, data_set)
+    
+    # Create SLURM script with optional resume
     script_path = create_slurm_script(params, study_name, trial_number, 
-                                    base_slurm_config, output_dir, project_name)
+                                    base_slurm_config, output_dir, project_name, checkpoint_path)
     
     # Submit job
     job_id = submit_slurm_job(script_path)
@@ -183,9 +146,83 @@ def submit_trial_job(params: Dict[str, Any], study_name: str, trial_number: int,
         print(f"Failed to submit trial {trial_number}")
         return None
     
-    print(f"Submitted trial {trial_number} as job {job_id}")
+    # Create or update job object
+    if existing_job:
+        existing_job.job_id = job_id
+        existing_job.submit_time = time.time()
+        existing_job.retry_count += 1
+        existing_job.completed = False
+        existing_job.preempted = False
+        existing_job.checkpoint_path = checkpoint_path
+        job_obj = existing_job
+        action = f"resubmitted (attempt {existing_job.retry_count + 1})"
+        if checkpoint_path:
+            action += f" with resume from {checkpoint_path}"
+    else:
+        job_obj = TrialJob(trial_number, job_id, params, time.time(), max_retries)
+        action = "submitted"
     
-    return TrialJob(trial_number, job_id, params, time.time())
+    print(f"✓ Trial {trial_number} {action} as job {job_id}")
+    return job_obj
+
+
+def create_slurm_script(params: Dict[str, Any], study_name: str, trial_number: int, 
+                       base_slurm_config: Dict[str, str], output_dir: str, project_name: str, 
+                       checkpoint_path: Optional[str] = None) -> str:
+    """Create SLURM script for this trial with optional checkpoint resume"""
+    
+    script_path = f"{output_dir}/trial_{trial_number}.sh"
+    
+    # Convert parameters to command line arguments (space-separated format)
+    cmd_args = []
+    for param_name, param_value in params.items():
+        cmd_args.extend([f"--{param_name}", str(param_value)])
+    
+    # Add study metadata (only supported arguments)
+    cmd_args.extend([
+        "--tag", f"optuna_trial_{trial_number}",
+        "--project_name", project_name
+    ])
+    
+    # Add checkpoint resume arguments if available
+    if checkpoint_path:
+        cmd_args.extend([
+            "--load_from_checkpoint", "True",
+            "--load_path", checkpoint_path
+        ])
+    
+    script_content = f"""#!/bin/bash
+#SBATCH --job-name={study_name}_trial_{trial_number}
+#SBATCH --partition={base_slurm_config.get('partition', 'a100')}
+#SBATCH --gpus={base_slurm_config.get('gpus', '1')}
+#SBATCH --cpus-per-task={base_slurm_config.get('cpus_per_task', '8')}
+#SBATCH --mem={base_slurm_config.get('mem', '100G')}
+#SBATCH --time={base_slurm_config.get('time', '6:00:00')}
+#SBATCH --output={output_dir}/trial_{trial_number}.out
+#SBATCH --error={output_dir}/trial_{trial_number}.err
+
+# Environment setup
+source ../bin/activate-hermit
+source .venv/bin/activate
+{base_slurm_config.get('env_setup', '')}
+
+# Change to project directory
+cd {os.getcwd()}
+
+# Run T-JEPA training with Optuna parameters
+./scripts/launch_tjepa.sh {' '.join(cmd_args)}
+
+# Signal completion and write final score
+echo "SLURM_JOB_COMPLETION: trial_{trial_number}" >> {output_dir}/completed_trials.log
+"""
+    
+    with open(script_path, 'w') as f:
+        f.write(script_content)
+    
+    # Make executable
+    os.chmod(script_path, 0o755)
+    
+    return script_path
 
 
 def check_job_status(job_id: str) -> bool:
@@ -197,6 +234,185 @@ def check_job_status(job_id: str) -> bool:
     except Exception as e:
         print(f"Error checking job {job_id}: {e}")
         return True  # Assume completed on error
+
+
+def get_job_exit_info(job_id: str) -> Dict[str, Any]:
+    """Get detailed job exit information including whether it was preempted."""
+    job_info = {
+        'completed': False,
+        'preempted': False,
+        'exit_code': None,
+        'state': None,
+        'runtime_seconds': 0
+    }
+    
+    try:
+        # Check if job is still running
+        squeue_result = subprocess.run(['squeue', '-j', job_id, '-h'], 
+                                     capture_output=True, text=True)
+        if squeue_result.returncode == 0 and squeue_result.stdout.strip():
+            # Job still running
+            return job_info
+        
+        # Job finished - get detailed info with sacct (better than scontrol for historical data)
+        sacct_result = subprocess.run(['sacct', '-j', job_id, '--format=JobID,State,ExitCode,Elapsed', 
+                                     '--noheader', '--parsable2'], 
+                                     capture_output=True, text=True)
+        
+        if sacct_result.returncode == 0 and sacct_result.stdout.strip():
+            lines = sacct_result.stdout.strip().split('\n')
+            for line in lines:
+                if '.batch' in line:  # Focus on the batch job (main job)
+                    parts = line.split('|')
+                    if len(parts) >= 4:
+                        job_info['state'] = parts[1]
+                        
+                        # Parse exit code (format: "0:15" -> exit_code=0, signal=15)
+                        exit_code_str = parts[2]
+                        if ':' in exit_code_str:
+                            exit_code, signal = exit_code_str.split(':')
+                            job_info['exit_code'] = int(exit_code)
+                            job_info['signal'] = int(signal)
+                        else:
+                            job_info['exit_code'] = int(exit_code_str) if exit_code_str.isdigit() else None
+                        
+                        # Parse elapsed time (format: "04:16:39")
+                        elapsed_str = parts[3]
+                        job_info['runtime_seconds'] = parse_elapsed_time(elapsed_str)
+                        break
+            
+            # Detect preemption
+            job_info['preempted'] = detect_preemption_sacct(job_info)
+            job_info['completed'] = True
+            
+    except Exception as e:
+        print(f"Error getting job info for {job_id}: {e}")
+        job_info['completed'] = True  # Assume completed on error
+    
+    return job_info
+
+
+def parse_elapsed_time(elapsed_str: str) -> int:
+    """Parse elapsed time string to seconds (e.g., '04:16:39' -> 15399)"""
+    try:
+        if '-' in elapsed_str:  # Format: "1-04:16:39" (days-hours:minutes:seconds)
+            days_part, time_part = elapsed_str.split('-')
+            days = int(days_part)
+            hours, minutes, seconds = map(int, time_part.split(':'))
+            return days * 86400 + hours * 3600 + minutes * 60 + seconds
+        else:  # Format: "04:16:39" (hours:minutes:seconds)
+            time_parts = elapsed_str.split(':')
+            if len(time_parts) == 3:
+                hours, minutes, seconds = map(int, time_parts)
+                return hours * 3600 + minutes * 60 + seconds
+            elif len(time_parts) == 2:  # Format: "16:39" (minutes:seconds)
+                minutes, seconds = map(int, time_parts)
+                return minutes * 60 + seconds
+    except Exception:
+        return 0
+    return 0
+
+
+def detect_preemption_sacct(job_info: Dict[str, Any]) -> bool:
+    """Detect preemption based on sacct output."""
+    
+    # Method 1: Check job state - CANCELLED is the key indicator from your example
+    if job_info['state'] in ['CANCELLED', 'PREEMPTED']:
+        return True
+    
+    # Method 2: Check for SIGTERM signal (15) - your example shows "0:15"  
+    if job_info.get('signal') == 15:  # SIGTERM
+        return True
+    
+    # Method 3: FAILED state with short runtime might be preemption
+    if job_info['state'] == 'FAILED' and job_info['runtime_seconds'] < 300:
+        return True
+    
+    return False
+
+
+
+
+def analyze_job_output_for_preemption(trial_number: int, output_dir: str) -> bool:
+    """Analyze job output and error files for preemption indicators."""
+    
+    # Check both .out and .err files
+    output_files = [
+        f"{output_dir}/trial_{trial_number}.out",
+        f"{output_dir}/trial_{trial_number}.err"
+    ]
+    
+    for output_file in output_files:
+        if not os.path.exists(output_file):
+            continue
+            
+        try:
+            with open(output_file, 'r') as f:
+                content = f.read().lower()
+            
+            # Look for preemption-related messages
+            preemption_indicators = [
+                'preempted',
+                'job cancelled',
+                'cancelled at',  # From your example: "CANCELLED AT 2025-08-05T00:03:34"
+                'terminated by signal',
+                'received sigterm',  # From your example: "Received SIGTERM: 15"
+                'slurm: job step aborted',
+                'slurmstepd: error',
+                'job exceeded memory limit',
+                'time limit exceeded',
+                'sigterm: 15'  # Direct match for your case
+            ]
+            
+            if any(indicator in content for indicator in preemption_indicators):
+                return True
+                
+        except Exception as e:
+            print(f"Error reading output file {output_file}: {e}")
+    
+    return False
+
+
+def find_latest_checkpoint(trial_number: int, output_dir: str, data_set: str) -> Optional[str]:
+    """Find the latest checkpoint for a trial."""
+    try:
+        # Updated pattern to match your actual format:
+        # checkpoints/higgs/optuna_trial_9-higgs__model_nlyrs_4_nheads_8_hdim_64__pred_ovrlap_F_npreds_4__nlyrs_16_activ_relunenc_1__lr_0.0002466400538168812_start_0.0_final_0.0_20250804_194722/epoch_*.pth
+        
+        # Search for any checkpoint directory starting with optuna_trial_{trial_number}
+        checkpoint_base_pattern = f"{output_dir}/../checkpoints/{data_set}/optuna_trial_{trial_number}-*"
+        checkpoint_dirs = glob.glob(checkpoint_base_pattern)
+        
+        if not checkpoint_dirs:
+            # Fallback to old simple pattern
+            checkpoint_base_pattern = f"{output_dir}/../checkpoints/{data_set}/optuna_trial_{trial_number}"
+            checkpoint_dirs = glob.glob(checkpoint_base_pattern)
+        
+        if not checkpoint_dirs:
+            print(f"No checkpoint directory found for trial {trial_number} in {checkpoint_base_pattern}")
+            return None
+        
+        # Take the first (or only) matching directory
+        checkpoint_dir = checkpoint_dirs[0]
+        
+        # Look for epoch files in this directory
+        epoch_pattern = f"{checkpoint_dir}/epoch_*.pth"
+        checkpoint_files = glob.glob(epoch_pattern)
+        
+        if not checkpoint_files:
+            print(f"No epoch checkpoints found in {checkpoint_dir}")
+            return None
+        
+        # Get the latest checkpoint by epoch number
+        latest_checkpoint = max(checkpoint_files, 
+                               key=lambda x: int(re.search(r'epoch_(\d+)', x).group(1)))
+        
+        print(f"Found checkpoint for trial {trial_number}: {latest_checkpoint}")
+        return latest_checkpoint
+        
+    except Exception as e:
+        print(f"Error finding checkpoint for trial {trial_number}: {e}")
+        return None
 
 
 def wait_for_batch_completion(active_jobs: List[TrialJob], output_dir: str, 
@@ -261,13 +477,14 @@ class BatchOptunaTuner:
     """Batch-based Optuna tuner for parallel SLURM job execution"""
     
     def __init__(self, config_path: str, study_name: str, base_slurm_config: Dict[str, str], 
-                 output_dir: str, project_name: str, batch_size: int = 10):
+                 output_dir: str, project_name: str, batch_size: int = 10, max_retries: int = 3):
         self.param_configs = parse_yaml_config(config_path)
         self.study_name = study_name
         self.base_slurm_config = base_slurm_config
         self.output_dir = output_dir
         self.project_name = project_name
         self.batch_size = batch_size
+        self.max_retries = max_retries
         self.pending_trials = []  # Trials ready to submit (unused in new approach)
         self.trial_results = {}   # trial_number -> score mapping
         self.active_jobs = {}     # trial_number -> TrialJob mapping
@@ -541,7 +758,7 @@ def run_parallel_optimization(study: optuna.Study, batch_tuner, n_trials: int):
             # Submit job
             job = submit_trial_job(params, batch_tuner.study_name, trial.number,
                                   batch_tuner.base_slurm_config, batch_tuner.output_dir, 
-                                  batch_tuner.project_name)
+                                  batch_tuner.project_name, max_retries=batch_tuner.max_retries)
             
             if job:
                 print(f"✓ Submitted trial {trial.number} as job {job.job_id}")
@@ -560,14 +777,41 @@ def run_parallel_optimization(study: optuna.Study, batch_tuner, n_trials: int):
             time.sleep(60)  # Check every minute
             
             completed_trials = []
+            retry_jobs = []
+            
             for trial_number, job_info in list(submitted_jobs.items()):
                 job = job_info['job']
                 
                 if check_job_status(job.job_id):  # Job completed
-                    # Read result
+                    # Get detailed job information
+                    job_exit_info = get_job_exit_info(job.job_id)
+                    
+                    if job_exit_info['preempted'] and job.retry_count < job.max_retries:
+                        # Job was preempted and we can retry
+                        print(f"⚠️ Trial {trial_number} was preempted (attempt {job.retry_count + 1})")
+                        
+                        # Check for additional preemption indicators in both .out and .err files
+                        if analyze_job_output_for_preemption(trial_number, batch_tuner.output_dir):
+                            print(f"   Preemption confirmed by output analysis")
+                        
+                        # Add exponential backoff delay
+                        backoff_delay = min(300, 60 * (2 ** job.retry_count))  # Max 5 minutes
+                        print(f"   Will retry in {backoff_delay} seconds...")
+                        
+                        retry_jobs.append((job, backoff_delay))
+                        completed_trials.append(trial_number)  # Remove from current batch
+                        continue
+                    
+                    # Job completed (success or permanent failure)
                     score = read_trial_result(batch_tuner.output_dir, trial_number)
                     
-                    # Update Optuna study with actual result
+                    if job_exit_info['preempted'] and job.retry_count >= job.max_retries:
+                        print(f"✗ Trial {trial_number} exceeded max retries ({job.max_retries}) - marking as failed")
+                        score = float('-inf')
+                    elif score == float('-inf') and not job_exit_info['preempted']:
+                        print(f"✗ Trial {trial_number} failed with genuine error (not preempted)")
+                    
+                    # Update Optuna study with result
                     study.tell(job_info['trial'], score)
                     
                     # Save to CSV
@@ -575,9 +819,32 @@ def run_parallel_optimization(study: optuna.Study, batch_tuner, n_trials: int):
                     
                     completed_count += 1
                     trials_completed += 1
-                    print(f"✓ Trial {trial_number} completed: score = {score} ({trials_completed}/{n_trials} total)")
+                    
+                    status = "✓" if score != float('-inf') else "✗"
+                    print(f"{status} Trial {trial_number} completed: score = {score} ({trials_completed}/{n_trials} total)")
                     
                     completed_trials.append(trial_number)
+            
+            # Handle retry jobs with backoff
+            for job, delay in retry_jobs:
+                if delay > 0:
+                    time.sleep(delay)
+                
+                # Resubmit the job
+                new_job = submit_trial_job(job.params, batch_tuner.study_name, job.trial_number,
+                                         batch_tuner.base_slurm_config, batch_tuner.output_dir, 
+                                         batch_tuner.project_name, existing_job=job, 
+                                         max_retries=batch_tuner.max_retries)
+                
+                if new_job:
+                    # Add back to current batch for monitoring
+                    submitted_jobs[job.trial_number] = {
+                        'trial': submitted_jobs[job.trial_number]['trial'],  # Keep original trial
+                        'job': new_job,
+                        'params': job.params
+                    }
+                    batch_tuner.active_jobs[job.trial_number] = new_job
+                    completed_trials.remove(job.trial_number)  # Keep in current batch
             
             # Remove completed trials
             for trial_number in completed_trials:
@@ -609,6 +876,7 @@ def main():
     parser.add_argument('--sampler', default='TPE', choices=['TPE', 'CmaEs', 'Random'], 
                        help='Optuna sampler algorithm')
     parser.add_argument('--resume', action='store_true', help='Resume existing study')
+    parser.add_argument('--max_retries', type=int, default=3, help='Maximum retries for preempted jobs')
     
     args = parser.parse_args()
     
@@ -662,7 +930,8 @@ def main():
         base_slurm_config, 
         output_dir, 
         args.project_name,
-        args.batch_size
+        args.batch_size,
+        args.max_retries
     )
     
     # Run optimization with parallel execution

@@ -204,7 +204,7 @@ def build_parser():
         "--exp_final_lr", type=float, default=0, help="Reference learning rate."
     )
     parser.add_argument(
-        "--exp_warmup", type=int, default=5, help="Number of warm up epochs"
+        "--exp_warmup", type=float, default=0.05, help="Fraction of warm up epochs"
     )
     parser.add_argument(
         "--exp_weight_decay",
@@ -395,6 +395,12 @@ def build_parser():
         type=int,
         default=1,
         help="Number of [CLS] tokens.",
+    )
+    parser.add_argument(
+        "--n_reg_tokens",
+        type=int,
+        default=1,
+        help="Number of [REG] (register/regularization) tokens for preventing representation collapse.",
     )
 
     ###########################################################################
