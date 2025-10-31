@@ -43,7 +43,9 @@ PRED_TYPE="transformer"
 PROBE_CADENCE=20
 PROBE_MODEL="linear_probe"
 TJEPA_RANDOM=false
+TEST_FLAG=false
 N_CLS_TOKENS=1
+N_REG_TOKENS=1
 LOAD_FROM_CHECKPOINT=False
 LOAD_PATH=""
 TAG=""
@@ -111,11 +113,13 @@ function show_help() {
     echo "  --probe_cadence         Probe cadence (default: $PROBE_CADENCE)"
     echo "  --probe_model           Probe model (default: $PROBE_MODEL)"
     echo "  --n_cls_tokens          Number of classification tokens (default: $N_CLS_TOKENS)"
+    echo "  --n_reg_tokens          Number of register/regularization tokens (default: $N_REG_TOKENS)"
     echo "  --random          Random seed (default: $TJEPA_RANDOM)"
     echo "  --load_from_checkpoint  Resume from checkpoint? (default: $LOAD_FROM_CHECKPOINT)"
     echo "  --load_path             Path to checkpoint .pth file (default: empty)"
     echo "  --tag                   Optional tag for MLflow experiment name (default: empty)"
     echo "  --project_name          MLflow project name (default: $PROJECT_NAME)"
+    echo "  --test                  Run in test mode"
     echo "  -h, --help              Show this help message and exit"
 }
 
@@ -325,8 +329,17 @@ while [[ $# -gt 0 ]]; do
             shift
             shift
             ;;
+        --n_reg_tokens)
+            N_REG_TOKENS="$2"
+            shift
+            shift
+            ;;
         --random)
             TJEPA_RANDOM=true
+            shift
+            ;;
+        --test)
+            TEST_FLAG=true
             shift
             ;;
         --tag)
@@ -389,6 +402,7 @@ COMMAND="${PY_LAUNCHER} run.py \
     --probe_cadence=$PROBE_CADENCE \
     --probe_model=$PROBE_MODEL \
     --n_cls_tokens=$N_CLS_TOKENS \
+    --n_reg_tokens=$N_REG_TOKENS \
     --load_from_checkpoint=$LOAD_FROM_CHECKPOINT \
     --load_path=$LOAD_PATH"
 
@@ -405,6 +419,10 @@ COMMAND="$COMMAND $DISTRIBUTED_FLAG"
 
 if [ "$TJEPA_RANDOM" = true ]; then
     COMMAND="$COMMAND --random=True"
+fi
+
+if [ "$TEST_FLAG" = true ]; then
+    COMMAND="$COMMAND --test=True"
 fi
 
 echo "Running command: $COMMAND"

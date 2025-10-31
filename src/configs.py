@@ -65,6 +65,110 @@ def build_parser():
     parser.add_argument("--verbose", type=str, default=False)
 
     ###########################################################################
+    # #### Parquet Dataset Config #############################################
+    ###########################################################################
+
+    parser.add_argument(
+        "--use_parquet_dataset",
+        type="bool",
+        default=False,
+        help="If True, use parquet dataset from risk-tabular-slurm instead of CSV benchmark datasets.",
+    )
+    parser.add_argument(
+        "--parquet_data_dir",
+        type=str,
+        default=None,
+        help="Directory containing parquet chunk files (e.g., chunk_0.parquet, chunk_1.parquet, ...).",
+    )
+    parser.add_argument(
+        "--parquet_data_files",
+        type=str,
+        default=None,
+        help="Comma-separated list of specific parquet files to use (e.g., 'chunk_0.parquet,chunk_1.parquet'). "
+        "If None, all parquet files in the directory will be used.",
+    )
+    parser.add_argument(
+        "--parquet_scaling_stats_file",
+        type=str,
+        default=None,
+        help="Path to the scaling statistics parquet file (e.g., stats_bootstrap.pq).",
+    )
+    parser.add_argument(
+        "--parquet_feature_names_file",
+        type=str,
+        default=None,
+        help="Path to feature importance CSV file (e.g., mi.csv) with columns: feature, importance, method.",
+    )
+    parser.add_argument(
+        "--parquet_num_features",
+        type=int,
+        default=None,
+        help="Number of top features to use from feature_names_file. If None, uses all features.",
+    )
+    parser.add_argument(
+        "--parquet_target_col",
+        type=str,
+        default="target",
+        help="Name of the target column in parquet files.",
+    )
+    parser.add_argument(
+        "--parquet_id_col",
+        type=str,
+        default="ID",
+        help="Name of the ID column in parquet files.",
+    )
+    parser.add_argument(
+        "--parquet_preload_data",
+        type="bool",
+        default=True,
+        help="If True, preload all data into memory/memmap for faster iteration. "
+        "If False, stream data from disk.",
+    )
+    parser.add_argument(
+        "--parquet_shuffle",
+        type="bool",
+        default=True,
+        help="If True, shuffle data during training.",
+    )
+    parser.add_argument(
+        "--parquet_scaling_method",
+        type=str,
+        default="mean_std",
+        choices=["mean_std", "min_max", "IQR", "1_percentile", "5_percentile", "none"],
+        help="Scaling method for features: mean_std, min_max, IQR, 1_percentile, 5_percentile, none.",
+    )
+    parser.add_argument(
+        "--parquet_infill_value",
+        type=str,
+        default="zero",
+        help="NaN infill strategy: 'zero', 'global_mean', 'previous_mean', 'chunk_N.parquet', or None.",
+    )
+    parser.add_argument(
+        "--parquet_transform",
+        type=str,
+        default=None,
+        help="Transform to apply after scaling: 'asinh' or None.",
+    )
+    parser.add_argument(
+        "--parquet_categorize_nan",
+        type="bool",
+        default=False,
+        help="If True, add binary NaN indicator features (doubles feature count).",
+    )
+    parser.add_argument(
+        "--parquet_clip_min",
+        type=float,
+        default=None,
+        help="Minimum value for clipping features after scaling. None = no clipping.",
+    )
+    parser.add_argument(
+        "--parquet_clip_max",
+        type=float,
+        default=None,
+        help="Maximum value for clipping features after scaling. None = no clipping.",
+    )
+
+    ###########################################################################
     # #### Experiment Config ##################################################
     ###########################################################################
     parser.add_argument(
@@ -400,7 +504,7 @@ def build_parser():
         "--n_reg_tokens",
         type=int,
         default=1,
-        help="Number of [REG] (register/regularization) tokens for preventing representation collapse.",
+        help="Number of [REG] (register/regularization) tokens for preventing representation collapse (default: 1).",
     )
 
     ###########################################################################

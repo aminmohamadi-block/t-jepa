@@ -25,10 +25,12 @@ class Tokenizer(nn.Module):
         d_token: int,
         bias: bool,
         n_cls_tokens: int = 1,
+        n_reg_tokens: int = 0,
     ) -> None:
         super().__init__()
         self.categories = categories
         self.n_cls_tokens = n_cls_tokens
+        self.n_reg_tokens = n_reg_tokens
         if categories is None or len(categories) == 0:
             d_bias = d_numerical
             self.category_offsets = None
@@ -43,9 +45,9 @@ class Tokenizer(nn.Module):
                     self.category_embeddings[i].weight, a=math.sqrt(5)
                 )
 
-        # take [CLS] token into account
+        # take [CLS] and [REG] tokens into account
         self.weight = nn.Parameter(
-            torch.Tensor(d_numerical + self.n_cls_tokens, d_token)
+            torch.Tensor(d_numerical + self.n_cls_tokens + self.n_reg_tokens, d_token)
         )
         self.bias = nn.Parameter(torch.Tensor(d_bias, d_token)) if bias else None
 
@@ -76,11 +78,16 @@ class Tokenizer(nn.Module):
             batch_size = len(x_some)
             device = x_some.device
 
-        x_num = torch.cat(
-            [torch.ones(batch_size, self.n_cls_tokens, device=device)]  # [CLS]
-            + ([] if x_num is None else [x_num]),
-            dim=1,
-        )
+        # Concatenate [CLS] tokens, numerical features, and [REG] tokens
+        special_tokens = []
+        if self.n_cls_tokens > 0:
+            special_tokens.append(torch.ones(batch_size, self.n_cls_tokens, device=device))  # [CLS]
+        if x_num is not None:
+            special_tokens.append(x_num)
+        if self.n_reg_tokens > 0:
+            special_tokens.append(torch.ones(batch_size, self.n_reg_tokens, device=device))  # [REG]
+        
+        x_num = torch.cat(special_tokens, dim=1)
         x = self.weight[None] * x_num[:, :, None]
         if x_cat is not None:
             x_cat_embedded = [
@@ -95,6 +102,7 @@ class Tokenizer(nn.Module):
                 [
                     torch.zeros(self.n_cls_tokens, self.bias.shape[1], device=x.device),
                     self.bias,
+                    torch.zeros(self.n_reg_tokens, self.bias.shape[1], device=x.device),
                 ]
             )
             x = x + bias[None]
@@ -137,6 +145,7 @@ class Encoder(nn.Module):
         self.gradient_clipping = gradient_clipping
         self.dim_feedforward = dim_feedforward
         self.n_cls_tokens = args.n_cls_tokens
+        self.n_reg_tokens = args.n_reg_tokens
 
         self.print_params()
 
@@ -146,6 +155,7 @@ class Encoder(nn.Module):
             d_token=hidden_dim,
             bias=True,
             n_cls_tokens=self.n_cls_tokens,
+            n_reg_tokens=self.n_reg_tokens,
         )
 
         ## Add feature type embedding
@@ -271,18 +281,41 @@ class Encoder(nn.Module):
             feature_type_embeddings = self.feature_type_embedding(self.feature_types)
             feature_type_embeddings = torch.unsqueeze(feature_type_embeddings, 0)
             feature_type_embeddings = feature_type_embeddings.repeat(out.size(0), 1, 1)
+            # Add zeros for CLS token, feature embeddings, and zeros for REG tokens
             feature_type_embeddings = torch.cat(
                 [
-                    torch.zeros(out.size(0), 1, self.hidden_dim).to(self.device),
-                    feature_type_embeddings,
+                    torch.zeros(out.size(0), self.n_cls_tokens, self.hidden_dim).to(self.device),  # CLS tokens
+                    feature_type_embeddings,  # Feature embeddings
+                    torch.zeros(out.size(0), self.n_reg_tokens, self.hidden_dim).to(self.device),  # REG tokens
                 ],
                 dim=1,
             )
             out = out + feature_type_embeddings
 
         if mask is not None:
-            out = apply_masks_from_idx(out, mask)
-            _debug_values(out[0].T, title="After applying masks")
+            # Apply masks only to features, always keep CLS and REG tokens
+            # Split the sequence: [CLS tokens] [features] [REG tokens]
+            cls_tokens = out[:, :self.n_cls_tokens, :] if self.n_cls_tokens > 0 else None
+            reg_tokens = out[:, -self.n_reg_tokens:, :] if self.n_reg_tokens > 0 else None
+            
+            # Extract feature tokens (between CLS and REG)
+            start_idx = self.n_cls_tokens
+            end_idx = -self.n_reg_tokens if self.n_reg_tokens > 0 else None
+            feature_tokens = out[:, start_idx:end_idx, :]
+            
+            # Apply mask only to the feature tokens
+            masked_features = apply_masks_from_idx(feature_tokens, mask)
+            
+            # Reconstruct: [CLS] [masked_features] [REG]
+            out_parts = []
+            if cls_tokens is not None:
+                out_parts.append(cls_tokens)
+            out_parts.append(masked_features)
+            if reg_tokens is not None:
+                out_parts.append(reg_tokens)
+            
+            out = torch.cat(out_parts, dim=1)
+            _debug_values(out[0].T, title="After applying masks with CLS/REG preserved")
 
         if self.feature_index_embedding is not None:
             feature_index_embeddings = self.feature_index_embedding(
