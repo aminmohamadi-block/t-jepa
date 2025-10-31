@@ -31,6 +31,7 @@ class Predictors(nn.Module):
         device: torch.device,
         cardinalities: list,
         pred_dim_feedforward: int = None,
+        n_cls_tokens: int = 0,
     ):
 
         super(Predictors, self).__init__()
@@ -50,6 +51,7 @@ class Predictors(nn.Module):
         self.num_features = num_features
         self.cardinalities = cardinalities
         self.dim_feedforward = pred_dim_feedforward
+        self.n_cls_tokens = n_cls_tokens
 
         if self.pred_type == "mlp":
             self.predictors = []
@@ -75,6 +77,7 @@ class Predictors(nn.Module):
                 layer_norm_eps=self.layer_norm_eps,
                 activation=self.activation,
                 dim_feedforward=self.dim_feedforward,
+                n_cls_tokens=self.n_cls_tokens,
             ).to(self.device)
 
         self.print_params()
@@ -227,6 +230,7 @@ class TransformerPredictor(nn.Module):
         activation: str,
         init_std: float = 0.02,
         dim_feedforward: int = None,
+        n_cls_tokens: int = 0,
     ):
         super(TransformerPredictor, self).__init__()
 
@@ -239,18 +243,21 @@ class TransformerPredictor(nn.Module):
         self.activation = activation
         self.num_features = num_features
         self.dim_feedforward = dim_feedforward
+        self.n_cls_tokens = n_cls_tokens
 
         self.predictor_emb = nn.Linear(
             self.model_hidden_dim, self.pred_embed_dim, bias=True
         )
         self.layer_norm = nn.LayerNorm(self.pred_embed_dim)
 
+        # Position embeddings for CLS tokens + feature tokens
+        total_positions = self.n_cls_tokens + self.num_features
         self.predictor_pos_embed = nn.Parameter(
-            torch.zeros(1, self.num_features, self.pred_embed_dim), requires_grad=False
+            torch.zeros(1, total_positions, self.pred_embed_dim), requires_grad=False
         )
         predictor_pos_embed = get_1d_sincos_pos_embed(
             self.pred_embed_dim,
-            np.arange(self.num_features),
+            np.arange(total_positions),
         )
         self.predictor_pos_embed.data.copy_(
             torch.from_numpy(predictor_pos_embed).float().unsqueeze(0)
@@ -294,22 +301,46 @@ class TransformerPredictor(nn.Module):
 
         _debug_values(x[0].T, title="Embedded input")
 
+        # x contains [CLS, masked_features]
+        # Get positional embeddings for these exact positions
         x_pos_embed = self.predictor_pos_embed.repeat(B, 1, 1)
+        
+        # Extract positional embeddings for [0:n_cls_tokens] + feature positions from masks_enc
+        if self.n_cls_tokens > 0:
+            # CLS positions
+            cls_pos = x_pos_embed[:, :self.n_cls_tokens, :]
+            # Feature positions (masks_enc contains indices 0 to n_features-1, we need to shift by n_cls_tokens)
+            feature_indices = [mask + self.n_cls_tokens for mask in masks_enc]
+            feature_pos = apply_masks_from_idx(x_pos_embed, feature_indices)
+            x_pos_embed = torch.cat([cls_pos, feature_pos], dim=1)
+        else:
+            x_pos_embed = apply_masks_from_idx(x_pos_embed, masks_enc)
 
         _debug_values(x_pos_embed[0].T, title="Positional embedding")
-
-        x_pos_embed = apply_masks_from_idx(x_pos_embed, masks_enc)
 
         x += x_pos_embed
 
         _debug_values(x[0].T, title="After adding positional embedding")
 
-        _, N_ctxt, D = x.shape
+        _, N_ctxt, _ = x.shape
 
         pos_embs = self.predictor_pos_embed.repeat(B, 1, 1)
 
         _debug_values(pos_embs[0].T, title="Positional embedding before mask")
-        pos_embs = apply_masks_from_idx(pos_embs, masks_pred)
+        # For prediction: we need [CLS_pos] + [target_feature_positions]
+        # The target from train.py has [CLS, target_features]
+        if self.n_cls_tokens > 0:
+            # Get CLS positional embeddings
+            cls_pos_embs = pos_embs[:, :self.n_cls_tokens, :]
+            # Get target feature positional embeddings (shift indices by n_cls_tokens)
+            pred_indices = [mask + self.n_cls_tokens for mask in masks_pred]
+            feature_pos_embs = apply_masks_from_idx(pos_embs, pred_indices)
+            cls_pos_embs = cls_pos_embs.repeat(len(masks_pred), 1, 1)
+            # Concatenate CLS and target feature positional embeddings
+            pos_embs = torch.cat([cls_pos_embs, feature_pos_embs], dim=1)
+        else:
+            # No CLS tokens, just use the original masks
+            pos_embs = apply_masks_from_idx(pos_embs, masks_pred)
 
         _debug_values(pos_embs[0].T, title="Positional embedding with mask")
 

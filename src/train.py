@@ -217,6 +217,7 @@ class Trainer:
                         "full_dataset_cuda": self.args.full_dataset_cuda,
                         "val_batch_size": self.args.val_batch_size,
                         "input_embed_dim": self.args.model_dim_hidden,
+                        "n_reg_tokens": self.args.n_reg_tokens,
                     }
                     online_dataset_args = Namespace(**online_dataset_args)
                     online_dataset = OnlineDataset(
@@ -425,27 +426,57 @@ class Trainer:
                     with torch.autocast(device_type=self.device.type, enabled=self.args.model_amp):
                         # target forward
                         with torch.no_grad():
+
                             _debug_values(batch[0].T, "batch[0]")
+                            # Target encocccccbvefivhblvucikbrjleujicuggufkgcctdjbvbv
+                            # der sees ALL features (no mask passed)
                             h = self.target_encoder(batch)
                             _debug_values(h[0].T, "h[0] after target_encoder")
+                            
+                            # Step 1: Remove REG tokens from target encoder output
+                            if self.args.n_reg_tokens > 0:
+                                h_no_reg = h[:, :-self.args.n_reg_tokens, :]
+                            else:
+                                h_no_reg = h
+                            
+                            # Step 2: Split CLS and features
+                            h_cls = h_no_reg[:, :self.args.n_cls_tokens, :]  # CLS tokens
+                            h_features = h_no_reg[:, self.args.n_cls_tokens:, :]  # All features
+                            
+                            # Step 3: Apply masks to features only
+                            h_masked_features = apply_masks_from_idx(h_features, masks_pred)
+                            
+                            # Step 4: Reconstruct with CLS prepended to masked features
+                            # Expand CLS to match the number of mask predictions
+                            h_cls_expanded = h_cls.repeat(len(masks_pred), 1, 1)
+                            h = torch.cat([h_cls_expanded, h_masked_features], dim=1)
+                            
+                            _debug_values(h[0].T, "h[0] after masking (CLS and REG removed)")
 
-                            h = apply_masks_from_idx(h, masks_pred)
-                            _debug_values(h[0].T, "h[0] after apply_masks")
-
+                        # Context encoder with masks (masks now include CLS offset)
                         z = self.context_encoder(batch, masks_enc)
                         _debug_values(z[0].T, "z[0] after context_encoder")
-
+                        
+                        # Context encoder output: [CLS, masked_features, REG]
+                        # Remove REG token before prediction (keep CLS token)
+                        if self.args.n_reg_tokens > 0:
+                            z_for_pred = z[:, :-self.args.n_reg_tokens, :]  # Remove REG only
+                        else:
+                            z_for_pred = z
+                        
                         if self.args.pred_type == "mlp":
-                            z = z.view(z.size(0), -1)  # flatten
-                            z = self.predictors(z, masks_pred.transpose(0, 1))
+                            z_for_pred = z_for_pred.view(z_for_pred.size(0), -1)  # flatten
+                            z_pred = self.predictors(z_for_pred, masks_pred.transpose(0, 1))
                             loss = torch.zeros(1, device=self.device)
-                            for z_, h_ in zip(z, h):
+                            for z_, h_ in zip(z_pred, h):
                                 loss += self.loss_fn(z_, h_)
 
-                        else:  # based on the approach of I-JEPA
-                            z = self.predictors(z, masks_enc, masks_pred)
-                            _debug_values(z[0].T, "z[0] after predictors")
-                            loss = self.loss_fn(z, h)
+                        else:  # Transformer predictor 
+                            # Pass [CLS, masked_features] to predictor (REG already removed)
+                            # Masks already account for CLS tokens
+                            z_pred = self.predictors(z_for_pred, masks_enc, masks_pred)
+                            _debug_values(z_pred[0].T, "z_pred after predictors")
+                            loss = self.loss_fn(z_pred, h)
 
                         # Synchronise gradients via DDP; we only need to
                         # reduce the loss tensor for logging/metrics.

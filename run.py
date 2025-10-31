@@ -27,6 +27,7 @@ from src.utils.train_utils import init_weights, get_distributed_dataloader
 from src.utils.optim_utils import init_optim
 
 from src.datasets.dict_to_data import DATASET_NAME_TO_DATASET_MAP
+from src.datasets.parquet_dataset import create_parquet_dataset_from_args
 
 
 def main(args):
@@ -102,7 +103,21 @@ def main(args):
     num_epochs = args.exp_train_total_epochs
     ipe_scale = args.exp_ipe_scale
 
-    dataset = DATASET_NAME_TO_DATASET_MAP[args.data_set](args)
+    # ------------------------------------------------------------------
+    # Dataset Loading: Conditional based on use_parquet_dataset flag
+    # ------------------------------------------------------------------
+    if args.use_parquet_dataset:
+        print("[Debug] Using parquet dataset from LocalFilesDataset", flush=True)
+        dataset = create_parquet_dataset_from_args(args)
+        print(f"[Debug] Parquet dataset created: N={dataset.N}, D={dataset.D}", flush=True)
+        # For parquet datasets, we use the dataset directly as an iterable
+        # No need for TorchDataset wrapper since LocalFilesDataset already handles batching
+        use_torch_dataset_wrapper = False
+    else:
+        print("[Debug] Using benchmark dataset (CSV/ARFF)", flush=True)
+        dataset = DATASET_NAME_TO_DATASET_MAP[args.data_set](args)
+        use_torch_dataset_wrapper = True
+
     args.is_batchlearning = args.batch_size != -1
     args.iteration = 0
     start_epoch = 0
@@ -130,17 +145,24 @@ def main(args):
         device = torch.device(f"cuda:{local_rank}")
     else:
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
     print("[Debug] Loading dataset …", flush=True)
-    dataset.load()
-    print("[Debug] Dataset loaded", flush=True)
-    args.test_size = 0
-    train_torchdataset = TorchDataset(
-        dataset=dataset,
-        mode="train",
-        kwargs=args,
-        device=device,
-        preprocessing=encode_data,
-    )
+    if use_torch_dataset_wrapper:
+        # Benchmark datasets: load and wrap with TorchDataset
+        dataset.load()
+        print("[Debug] Dataset loaded", flush=True)
+        args.test_size = 0
+        train_torchdataset = TorchDataset(
+            dataset=dataset,
+            mode="train",
+            kwargs=args,
+            device=device,
+            preprocessing=encode_data,
+        )
+    else:
+        # Parquet datasets: already loaded and batched in LocalFilesDataset
+        print("[Debug] Parquet dataset ready (preprocessing handled by LocalFilesDataset)", flush=True)
+        train_torchdataset = dataset  # Use directly as iterable
 
     context_encoder = Encoder(
         idx_num_features=dataset.num_features,
@@ -171,6 +193,7 @@ def main(args):
         device=device,
         cardinalities=dataset.cardinalities,
         pred_dim_feedforward=args.pred_dim_feedforward,
+        n_cls_tokens=args.n_cls_tokens,
     )
 
     for m in context_encoder.modules():
@@ -224,11 +247,39 @@ def main(args):
         args.mask_num_encs,
         dataset.D,
         dataset.cardinalities,
+        args.n_cls_tokens,
     )
 
     print("[Debug] Building DataLoader …", flush=True)
 
-    if args.mp_distributed:
+    if args.use_parquet_dataset:
+        # Parquet datasets: LocalFilesDataset already batches data
+        # We need to create a simple wrapper that applies masking to pre-batched data
+        class ParquetDataLoaderWrapper:
+            """Wrapper that applies masking to pre-batched data from LocalFilesDataset."""
+
+            def __init__(self, dataset, mask_collator, device):
+                self.dataset = dataset
+                self.mask_collator = mask_collator
+                self.device = device
+
+            def __iter__(self):
+                for batch in self.dataset:
+                    # batch is already a tensor [batch_size, num_features]
+                    # Move to device
+                    batch = batch.to(self.device, non_blocking=True)
+                    # Generate masks for this batch
+                    batch, masks_enc, masks_pred = self.mask_collator([batch])
+                    # mask_collator expects a list and returns batched tensors
+                    yield batch, masks_enc, masks_pred
+
+            def __len__(self):
+                return len(self.dataset)
+
+        dataloader = ParquetDataLoaderWrapper(train_torchdataset, mask_collator, device)
+        print(f"[Debug] Parquet DataLoader created (pre-batched, batch_size={args.batch_size})")
+
+    elif args.mp_distributed:
         # Use a DistributedSampler-backed DataLoader so that each rank gets a shard
         # Divide batch size by world size to maintain consistent effective batch size
         per_gpu_batch_size = args.batch_size // distributed_args["world_size"]

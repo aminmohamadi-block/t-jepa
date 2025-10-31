@@ -13,3 +13,5 @@ tensorboard
 rtdl_revisiting_models
 wandb
 mlflow
+polars
+pyarrow

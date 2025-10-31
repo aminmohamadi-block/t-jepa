@@ -91,6 +91,11 @@ class OnlineDataset(BaseDataset):
         for batch, _ in tqdm(dataloader):
             batch = batch.to(device)
             z = self.encoder(batch)
+            
+            # Remove REG tokens if present (they are at the end of the sequence)
+            if hasattr(self.args, 'n_reg_tokens') and self.args.n_reg_tokens > 0:
+                z = z[:, :-self.args.n_reg_tokens, :]
+            
             total_z.append(z.detach().cpu().numpy())
 
         self.X = np.concatenate(total_z, axis=0)

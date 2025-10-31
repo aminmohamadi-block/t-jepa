@@ -20,6 +20,7 @@ class MaskCollator(object):
         num_encs: int,
         num_features: int,
         cardinalities: list,
+        n_cls_tokens: int = 1,
     ):
         super(MaskCollator, self).__init__()
 
@@ -40,6 +41,7 @@ class MaskCollator(object):
 
         self.num_features = num_features
         self.cardinalities = cardinalities
+        self.n_cls_tokens = n_cls_tokens
 
         err_msg = "Max and min shares are too close."
 
@@ -136,6 +138,8 @@ class MaskCollator(object):
 
         mask_cxt = []
         mask_trgt = []
+        # Generate indices for features only (0 to n_features-1)
+        # CLS and REG tokens are handled separately in the encoder
         all_indices = np.arange(n_features)
 
         while len(mask_cxt) < n_encs:
