@@ -403,6 +403,9 @@ class EarlyStopCounter:
                 save_pth, MODEL_CP_NAME.format(epoch=epoch)
             )
 
+        # Create parent directory if it doesn't exist
+        os.makedirs(os.path.dirname(self.last_model_path), exist_ok=True)
+
         # We encountered issues with the model being reliably checkpointed.
         # This is a clunky way of confirming it is / giving the script
         # "multiple tries", but, if it ain't broke...

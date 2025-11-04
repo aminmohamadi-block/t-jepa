@@ -107,6 +107,9 @@ class TJEPAParquetDataset:
 
         # Store metadata for T-JEPA compatibility
         self.N = len(self.dataset.all_features_tensor) if args.parquet_preload_data else None
+
+        # Get actual feature count from LocalFilesDataset
+        # LocalFilesDataset keeps target and ID separate from features
         self.D = len(self.dataset.feature_names_to_keep)
 
         # Account for categorize_nan doubling features
@@ -117,6 +120,9 @@ class TJEPAParquetDataset:
         self.num_features = list(range(self.D))
         self.cat_features = []
         self.cardinalities = []
+
+        # Dataset name for logging/tracking
+        self.dataset_name = "parquet_dataset"
 
         logger.info(f"TJEPAParquetDataset initialized: N={self.N}, D={self.D}")
         logger.info(f"Feature scaling: {args.parquet_scaling_method}, "
