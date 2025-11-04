@@ -292,6 +292,30 @@ class Encoder(nn.Module):
             )
             out = out + feature_type_embeddings
 
+        # Apply feature_index_embedding BEFORE masking (same pattern as feature_type_embedding)
+        if self.feature_index_embedding is not None:
+            feature_index_embeddings = self.feature_index_embedding(
+                self.feature_indices
+            )
+
+            feature_index_embeddings = torch.unsqueeze(feature_index_embeddings, 0)
+
+            feature_index_embeddings = feature_index_embeddings.repeat(
+                out.size(0), 1, 1
+            )
+
+            # Add zeros for CLS and REG tokens, just like feature_type_embedding does
+            feature_index_embeddings = torch.cat(
+                [
+                    torch.zeros(out.size(0), self.n_cls_tokens, self.hidden_dim).to(self.device),  # CLS tokens
+                    feature_index_embeddings,  # Feature embeddings
+                    torch.zeros(out.size(0), self.n_reg_tokens, self.hidden_dim).to(self.device),  # REG tokens
+                ],
+                dim=1,
+            )
+
+            out = out + feature_index_embeddings
+
         if mask is not None:
             # Apply masks only to features, always keep CLS and REG tokens
             # Split the sequence: [CLS tokens] [features] [REG tokens]
@@ -316,19 +340,6 @@ class Encoder(nn.Module):
             
             out = torch.cat(out_parts, dim=1)
             _debug_values(out[0].T, title="After applying masks with CLS/REG preserved")
-
-        if self.feature_index_embedding is not None:
-            feature_index_embeddings = self.feature_index_embedding(
-                self.feature_indices
-            )
-
-            feature_index_embeddings = torch.unsqueeze(feature_index_embeddings, 0)
-
-            feature_index_embeddings = feature_index_embeddings.repeat(
-                out.size(0), 1, 1
-            )
-
-            out = out + feature_index_embeddings
 
         return out
 

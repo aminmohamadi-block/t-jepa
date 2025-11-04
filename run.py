@@ -268,9 +268,12 @@ def main(args):
                     # batch is already a tensor [batch_size, num_features]
                     # Move to device
                     batch = batch.to(self.device, non_blocking=True)
+                    # MaskCollator expects a list of (features, targets) tuples
+                    # Convert batched tensor to list format: [(features1, None), (features2, None), ...]
+                    batch_list = [(batch[i], None) for i in range(len(batch))]
                     # Generate masks for this batch
-                    batch, masks_enc, masks_pred = self.mask_collator([batch])
-                    # mask_collator expects a list and returns batched tensors
+                    batch, masks_enc, masks_pred = self.mask_collator(batch_list)
+                    # mask_collator returns batched tensors
                     yield batch, masks_enc, masks_pred
 
             def __len__(self):
