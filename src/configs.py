@@ -169,6 +169,31 @@ def build_parser():
     )
 
     ###########################################################################
+    # #### Profiling Config ###################################################
+    ###########################################################################
+    parser.add_argument(
+        "--profiling_level",
+        type=str,
+        choices=["DISABLED", "LIGHTWEIGHT", "DETAILED", "TRACE"],
+        default="DISABLED",
+        help="Profiling verbosity level: DISABLED (no profiling), LIGHTWEIGHT (<1%% overhead), "
+        "DETAILED (2-5%% overhead, recommended for finding bottlenecks), "
+        "TRACE (10-20%% overhead, use for 5-10 iterations only with kernel-level details).",
+    )
+    parser.add_argument(
+        "--profiling_output",
+        type=str,
+        default=None,
+        help="Output file for profiling results. If None, uses profiling_{job_name}.json",
+    )
+    parser.add_argument(
+        "--profiling_summary_every",
+        type=int,
+        default=10,
+        help="Print profiling summary every N epochs (0 to disable). Default: 10",
+    )
+
+    ###########################################################################
     # #### Experiment Config ##################################################
     ###########################################################################
     parser.add_argument(

@@ -13,6 +13,7 @@ from src.utils.train_utils import (
     PositionalEncoding,
     apply_masks_from_idx,
 )
+from src.utils.profiler import get_profiler
 
 
 class Tokenizer(nn.Module):
@@ -67,45 +68,52 @@ class Tokenizer(nn.Module):
         x_num: torch.Tensor,
         x_cat: Optional[torch.Tensor],
     ) -> torch.Tensor:
+        profiler = get_profiler()
 
-        x_some = x_num if x_cat is None else x_cat
+        with profiler.profile("token_preparation"):
+            x_some = x_num if x_cat is None else x_cat
 
-        assert x_some is not None
-        if isinstance(x_some, list):
-            batch_size = len(x_some[0])
-            device = x_some[0].device
-        else:
-            batch_size = len(x_some)
-            device = x_some.device
+            assert x_some is not None
+            if isinstance(x_some, list):
+                batch_size = len(x_some[0])
+                device = x_some[0].device
+            else:
+                batch_size = len(x_some)
+                device = x_some.device
 
-        # Concatenate [CLS] tokens, numerical features, and [REG] tokens
-        special_tokens = []
-        if self.n_cls_tokens > 0:
-            special_tokens.append(torch.ones(batch_size, self.n_cls_tokens, device=device))  # [CLS]
-        if x_num is not None:
-            special_tokens.append(x_num)
-        if self.n_reg_tokens > 0:
-            special_tokens.append(torch.ones(batch_size, self.n_reg_tokens, device=device))  # [REG]
-        
-        x_num = torch.cat(special_tokens, dim=1)
-        x = self.weight[None] * x_num[:, :, None]
+            # Concatenate [CLS] tokens, numerical features, and [REG] tokens
+            special_tokens = []
+            if self.n_cls_tokens > 0:
+                special_tokens.append(torch.ones(batch_size, self.n_cls_tokens, device=device))  # [CLS]
+            if x_num is not None:
+                special_tokens.append(x_num)
+            if self.n_reg_tokens > 0:
+                special_tokens.append(torch.ones(batch_size, self.n_reg_tokens, device=device))  # [REG]
+
+            x_num = torch.cat(special_tokens, dim=1)
+
+        with profiler.profile("linear_projection"):
+            x = self.weight[None] * x_num[:, :, None]
+
         if x_cat is not None:
-            x_cat_embedded = [
-                self.category_embeddings[i](x_cat[i])
-                for i in range(len(self.categories))
-            ]
-            x_cat_embedded = torch.stack(x_cat_embedded, dim=1)
-            x = torch.cat([x, x_cat_embedded], dim=1)
+            with profiler.profile("categorical_embeddings"):
+                x_cat_embedded = [
+                    self.category_embeddings[i](x_cat[i])
+                    for i in range(len(self.categories))
+                ]
+                x_cat_embedded = torch.stack(x_cat_embedded, dim=1)
+                x = torch.cat([x, x_cat_embedded], dim=1)
 
         if self.bias is not None:
-            bias = torch.cat(
-                [
-                    torch.zeros(self.n_cls_tokens, self.bias.shape[1], device=x.device),
-                    self.bias,
-                    torch.zeros(self.n_reg_tokens, self.bias.shape[1], device=x.device),
-                ]
-            )
-            x = x + bias[None]
+            with profiler.profile("bias_addition"):
+                bias = torch.cat(
+                    [
+                        torch.zeros(self.n_cls_tokens, self.bias.shape[1], device=x.device),
+                        self.bias,
+                        torch.zeros(self.n_reg_tokens, self.bias.shape[1], device=x.device),
+                    ]
+                )
+                x = x + bias[None]
         return x
 
 
@@ -250,102 +258,116 @@ class Encoder(nn.Module):
         )
 
     def in_embbed_sample(self, x, mask=None):
+        profiler = get_profiler()
 
-        x_num = x[:, self.idx_num_features]
-        x_cat = x[:, self.idx_cat_features] if len(self.idx_cat_features) > 0 else None
+        with profiler.profile("feature_separation"):
+            x_num = x[:, self.idx_num_features]
+            x_cat = x[:, self.idx_cat_features] if len(self.idx_cat_features) > 0 else None
 
         if x_cat is not None:
-            x_cat = x_cat.detach().cpu().numpy()
-            categories = [list(range(card[1])) for card in self.cardinalities]
-            ohe = OneHotEncoder(sparse_output=False, categories=categories).fit(x_cat)
-            x_cat = torch.tensor(ohe.transform(x_cat), device=x_num.device)
+            with profiler.profile("categorical_encoding"):
+                x_cat = x_cat.detach().cpu().numpy()
+                categories = [list(range(card[1])) for card in self.cardinalities]
+                ohe = OneHotEncoder(sparse_output=False, categories=categories).fit(x_cat)
+                x_cat = torch.tensor(ohe.transform(x_cat), device=x_num.device)
 
-            cardinalities = [card[1] for card in self.cardinalities]
-            split_indices = torch.tensor([0] + cardinalities).cumsum(0)
-            one_hot_features = [
-                x_cat[:, split_indices[i] : split_indices[i + 1]]
-                for i in range(len(split_indices) - 1)
-            ]
-            cat_indices = [torch.argmax(feature, dim=1) for feature in one_hot_features]
+                cardinalities = [card[1] for card in self.cardinalities]
+                split_indices = torch.tensor([0] + cardinalities).cumsum(0)
+                one_hot_features = [
+                    x_cat[:, split_indices[i] : split_indices[i + 1]]
+                    for i in range(len(split_indices) - 1)
+                ]
+                cat_indices = [torch.argmax(feature, dim=1) for feature in one_hot_features]
         else:
             cat_indices = None
 
         _debug_values(x[0].T, title="Before linear embedding")
-        out = self.tokenizer(x_num, cat_indices)
+        with profiler.profile("tokenizer"):
+            out = self.tokenizer(x_num, cat_indices)
 
         _debug_values(out[0].T, title="After linear embedding")
-        out = self.pe(out)
+        with profiler.profile("positional_encoding"):
+            out = self.pe(out)
         _debug_values(out[0].T, title="After positional encoding")
 
         if self.feature_type_embedding is not None:
-            feature_type_embeddings = self.feature_type_embedding(self.feature_types)
-            feature_type_embeddings = torch.unsqueeze(feature_type_embeddings, 0)
-            feature_type_embeddings = feature_type_embeddings.repeat(out.size(0), 1, 1)
-            # Add zeros for CLS token, feature embeddings, and zeros for REG tokens
-            feature_type_embeddings = torch.cat(
-                [
-                    torch.zeros(out.size(0), self.n_cls_tokens, self.hidden_dim).to(self.device),  # CLS tokens
-                    feature_type_embeddings,  # Feature embeddings
-                    torch.zeros(out.size(0), self.n_reg_tokens, self.hidden_dim).to(self.device),  # REG tokens
-                ],
-                dim=1,
-            )
-            out = out + feature_type_embeddings
+            with profiler.profile("feature_type_embedding"):
+                feature_type_embeddings = self.feature_type_embedding(self.feature_types)
+                feature_type_embeddings = torch.unsqueeze(feature_type_embeddings, 0)
+                feature_type_embeddings = feature_type_embeddings.repeat(out.size(0), 1, 1)
+                # Add zeros for CLS token, feature embeddings, and zeros for REG tokens
+                feature_type_embeddings = torch.cat(
+                    [
+                        torch.zeros(out.size(0), self.n_cls_tokens, self.hidden_dim).to(self.device),  # CLS tokens
+                        feature_type_embeddings,  # Feature embeddings
+                        torch.zeros(out.size(0), self.n_reg_tokens, self.hidden_dim).to(self.device),  # REG tokens
+                    ],
+                    dim=1,
+                )
+                out = out + feature_type_embeddings
 
         # Apply feature_index_embedding BEFORE masking (same pattern as feature_type_embedding)
         if self.feature_index_embedding is not None:
-            feature_index_embeddings = self.feature_index_embedding(
-                self.feature_indices
-            )
+            with profiler.profile("feature_index_embedding"):
+                feature_index_embeddings = self.feature_index_embedding(
+                    self.feature_indices
+                )
 
-            feature_index_embeddings = torch.unsqueeze(feature_index_embeddings, 0)
+                feature_index_embeddings = torch.unsqueeze(feature_index_embeddings, 0)
 
-            feature_index_embeddings = feature_index_embeddings.repeat(
-                out.size(0), 1, 1
-            )
+                feature_index_embeddings = feature_index_embeddings.repeat(
+                    out.size(0), 1, 1
+                )
 
-            # Add zeros for CLS and REG tokens, just like feature_type_embedding does
-            feature_index_embeddings = torch.cat(
-                [
-                    torch.zeros(out.size(0), self.n_cls_tokens, self.hidden_dim).to(self.device),  # CLS tokens
-                    feature_index_embeddings,  # Feature embeddings
-                    torch.zeros(out.size(0), self.n_reg_tokens, self.hidden_dim).to(self.device),  # REG tokens
-                ],
-                dim=1,
-            )
+                # Add zeros for CLS and REG tokens, just like feature_type_embedding does
+                feature_index_embeddings = torch.cat(
+                    [
+                        torch.zeros(out.size(0), self.n_cls_tokens, self.hidden_dim).to(self.device),  # CLS tokens
+                        feature_index_embeddings,  # Feature embeddings
+                        torch.zeros(out.size(0), self.n_reg_tokens, self.hidden_dim).to(self.device),  # REG tokens
+                    ],
+                    dim=1,
+                )
 
-            out = out + feature_index_embeddings
+                out = out + feature_index_embeddings
 
         if mask is not None:
-            # Apply masks only to features, always keep CLS and REG tokens
-            # Split the sequence: [CLS tokens] [features] [REG tokens]
-            cls_tokens = out[:, :self.n_cls_tokens, :] if self.n_cls_tokens > 0 else None
-            reg_tokens = out[:, -self.n_reg_tokens:, :] if self.n_reg_tokens > 0 else None
-            
-            # Extract feature tokens (between CLS and REG)
-            start_idx = self.n_cls_tokens
-            end_idx = -self.n_reg_tokens if self.n_reg_tokens > 0 else None
-            feature_tokens = out[:, start_idx:end_idx, :]
-            
-            # Apply mask only to the feature tokens
-            masked_features = apply_masks_from_idx(feature_tokens, mask)
-            
-            # Reconstruct: [CLS] [masked_features] [REG]
-            out_parts = []
-            if cls_tokens is not None:
-                out_parts.append(cls_tokens)
-            out_parts.append(masked_features)
-            if reg_tokens is not None:
-                out_parts.append(reg_tokens)
-            
-            out = torch.cat(out_parts, dim=1)
-            _debug_values(out[0].T, title="After applying masks with CLS/REG preserved")
+            with profiler.profile("apply_mask"):
+                # Apply masks only to features, always keep CLS and REG tokens
+                # Split the sequence: [CLS tokens] [features] [REG tokens]
+                cls_tokens = out[:, :self.n_cls_tokens, :] if self.n_cls_tokens > 0 else None
+                reg_tokens = out[:, -self.n_reg_tokens:, :] if self.n_reg_tokens > 0 else None
+
+                # Extract feature tokens (between CLS and REG)
+                start_idx = self.n_cls_tokens
+                end_idx = -self.n_reg_tokens if self.n_reg_tokens > 0 else None
+                feature_tokens = out[:, start_idx:end_idx, :]
+
+                # Apply mask only to the feature tokens
+                masked_features = apply_masks_from_idx(feature_tokens, mask)
+
+                # Reconstruct: [CLS] [masked_features] [REG]
+                out_parts = []
+                if cls_tokens is not None:
+                    out_parts.append(cls_tokens)
+                out_parts.append(masked_features)
+                if reg_tokens is not None:
+                    out_parts.append(reg_tokens)
+
+                out = torch.cat(out_parts, dim=1)
+                _debug_values(out[0].T, title="After applying masks with CLS/REG preserved")
 
         return out
 
     def forward(self, x, mask=None):
-        x = self.in_embbed_sample(x, mask)
-        out = self.encoder(x)
+        profiler = get_profiler()
+
+        with profiler.profile("embedding"):
+            x = self.in_embbed_sample(x, mask)
+
+        with profiler.profile("transformer"):
+            out = self.encoder(x)
+
         return out
 
 
@@ -380,16 +402,21 @@ class TabularEncoder(nn.Module):
         self.dropout2 = nn.Dropout(p=p_dropout)
 
     def forward(self, x):
-        _debug_values(x[0].T, title="Before transformer")
-        x = self.transformer(x)
-        x = self.dropout1(x)
-        _debug_values(x[0].T, title="Before layer norm")
-        x = self.layernorm1(x)
-        _debug_values(x[0].T, title="Before FC")
-        x = self.fc(x)
-        x = self.dropout2(x)
+        profiler = get_profiler()
 
-        _debug_values(x[0].T, title="Before layer norm")
-        x = self.layernorm2(x)
+        _debug_values(x[0].T, title="Before transformer")
+        with profiler.profile("transformer_layers"):
+            x = self.transformer(x)
+
+        with profiler.profile("post_transformer_processing"):
+            x = self.dropout1(x)
+            _debug_values(x[0].T, title="Before layer norm")
+            x = self.layernorm1(x)
+            _debug_values(x[0].T, title="Before FC")
+            x = self.fc(x)
+            x = self.dropout2(x)
+
+            _debug_values(x[0].T, title="Before layer norm")
+            x = self.layernorm2(x)
         _debug_values(x[0].T, title="After transformer")
         return x

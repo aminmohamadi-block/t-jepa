@@ -12,6 +12,7 @@ from src.utils.train_utils import (
     trunc_normal_,
     apply_masks_from_idx,
 )
+from src.utils.profiler import get_profiler
 
 
 class Predictors(nn.Module):
@@ -293,77 +294,83 @@ class TransformerPredictor(nn.Module):
             nn.init.constant_(m.weight, 1.0)
 
     def forward(self, x, masks_enc, masks_pred):
+        profiler = get_profiler()
 
         B = len(x)
 
         _debug_values(x[0].T, title="Input")
-        x = self.predictor_emb(x)
+        with profiler.profile("predictor_embedding"):
+            x = self.predictor_emb(x)
 
         _debug_values(x[0].T, title="Embedded input")
 
-        # x contains [CLS, masked_features]
-        # Get positional embeddings for these exact positions
-        x_pos_embed = self.predictor_pos_embed.repeat(B, 1, 1)
-        
-        # Extract positional embeddings for [0:n_cls_tokens] + feature positions from masks_enc
-        if self.n_cls_tokens > 0:
-            # CLS positions
-            cls_pos = x_pos_embed[:, :self.n_cls_tokens, :]
-            # Feature positions (masks_enc contains indices 0 to n_features-1, we need to shift by n_cls_tokens)
-            feature_indices = [mask + self.n_cls_tokens for mask in masks_enc]
-            feature_pos = apply_masks_from_idx(x_pos_embed, feature_indices)
-            x_pos_embed = torch.cat([cls_pos, feature_pos], dim=1)
-        else:
-            x_pos_embed = apply_masks_from_idx(x_pos_embed, masks_enc)
+        with profiler.profile("positional_embedding_context"):
+            # x contains [CLS, masked_features]
+            # Get positional embeddings for these exact positions
+            x_pos_embed = self.predictor_pos_embed.repeat(B, 1, 1)
 
-        _debug_values(x_pos_embed[0].T, title="Positional embedding")
+            # Extract positional embeddings for [0:n_cls_tokens] + feature positions from masks_enc
+            if self.n_cls_tokens > 0:
+                # CLS positions
+                cls_pos = x_pos_embed[:, :self.n_cls_tokens, :]
+                # Feature positions (masks_enc contains indices 0 to n_features-1, we need to shift by n_cls_tokens)
+                feature_indices = [mask + self.n_cls_tokens for mask in masks_enc]
+                feature_pos = apply_masks_from_idx(x_pos_embed, feature_indices)
+                x_pos_embed = torch.cat([cls_pos, feature_pos], dim=1)
+            else:
+                x_pos_embed = apply_masks_from_idx(x_pos_embed, masks_enc)
 
-        x += x_pos_embed
+            _debug_values(x_pos_embed[0].T, title="Positional embedding")
+
+            x += x_pos_embed
 
         _debug_values(x[0].T, title="After adding positional embedding")
 
         _, N_ctxt, _ = x.shape
 
-        pos_embs = self.predictor_pos_embed.repeat(B, 1, 1)
+        with profiler.profile("mask_token_preparation"):
+            pos_embs = self.predictor_pos_embed.repeat(B, 1, 1)
 
-        _debug_values(pos_embs[0].T, title="Positional embedding before mask")
-        # For prediction: we need [CLS_pos] + [target_feature_positions]
-        # The target from train.py has [CLS, target_features]
-        if self.n_cls_tokens > 0:
-            # Get CLS positional embeddings
-            cls_pos_embs = pos_embs[:, :self.n_cls_tokens, :]
-            # Get target feature positional embeddings (shift indices by n_cls_tokens)
-            pred_indices = [mask + self.n_cls_tokens for mask in masks_pred]
-            feature_pos_embs = apply_masks_from_idx(pos_embs, pred_indices)
-            cls_pos_embs = cls_pos_embs.repeat(len(masks_pred), 1, 1)
-            # Concatenate CLS and target feature positional embeddings
-            pos_embs = torch.cat([cls_pos_embs, feature_pos_embs], dim=1)
-        else:
-            # No CLS tokens, just use the original masks
-            pos_embs = apply_masks_from_idx(pos_embs, masks_pred)
+            _debug_values(pos_embs[0].T, title="Positional embedding before mask")
+            # For prediction: we need [CLS_pos] + [target_feature_positions]
+            # The target from train.py has [CLS, target_features]
+            if self.n_cls_tokens > 0:
+                # Get CLS positional embeddings
+                cls_pos_embs = pos_embs[:, :self.n_cls_tokens, :]
+                # Get target feature positional embeddings (shift indices by n_cls_tokens)
+                pred_indices = [mask + self.n_cls_tokens for mask in masks_pred]
+                feature_pos_embs = apply_masks_from_idx(pos_embs, pred_indices)
+                cls_pos_embs = cls_pos_embs.repeat(len(masks_pred), 1, 1)
+                # Concatenate CLS and target feature positional embeddings
+                pos_embs = torch.cat([cls_pos_embs, feature_pos_embs], dim=1)
+            else:
+                # No CLS tokens, just use the original masks
+                pos_embs = apply_masks_from_idx(pos_embs, masks_pred)
 
-        _debug_values(pos_embs[0].T, title="Positional embedding with mask")
+            _debug_values(pos_embs[0].T, title="Positional embedding with mask")
 
-        pred_tokens = self.mask_token.repeat(pos_embs.size(0), pos_embs.size(1), 1)
-        pred_tokens += pos_embs
+            pred_tokens = self.mask_token.repeat(pos_embs.size(0), pos_embs.size(1), 1)
+            pred_tokens += pos_embs
 
-        _debug_values(pred_tokens[0].T, title="Predictor tokens")
+            _debug_values(pred_tokens[0].T, title="Predictor tokens")
 
-        x = x.repeat(len(masks_pred), 1, 1)
-        x = torch.cat([x, pred_tokens], dim=1)
+            x = x.repeat(len(masks_pred), 1, 1)
+            x = torch.cat([x, pred_tokens], dim=1)
 
         _debug_values(x[0].T, title="Input with predictor tokens")
 
-        x = self.transformer(x)
-        x = self.predictor_norm(x)
+        with profiler.profile("predictor_transformer"):
+            x = self.transformer(x)
+            x = self.predictor_norm(x)
 
         _debug_values(x[0].T, title="After transformer")
 
-        x = x[:, N_ctxt:]
+        with profiler.profile("predictor_output_projection"):
+            x = x[:, N_ctxt:]
 
-        _debug_values(x[0].T, title="After slicing")
+            _debug_values(x[0].T, title="After slicing")
 
-        x = self.predictor_proj(x)
+            x = self.predictor_proj(x)
 
         _debug_values(x[0].T, title="After projection")
 

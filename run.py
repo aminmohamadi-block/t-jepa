@@ -28,9 +28,21 @@ from src.utils.optim_utils import init_optim
 
 from src.datasets.dict_to_data import DATASET_NAME_TO_DATASET_MAP
 from src.datasets.parquet_dataset import create_parquet_dataset_from_args
+from src.utils.profiler import get_profiler, ProfilingLevel
 
 
 def main(args):
+
+    # Initialize profiler based on command line args
+    profiler = get_profiler()
+    if hasattr(args, 'profiling_level'):
+        try:
+            profiler.set_level(ProfilingLevel[args.profiling_level])
+            if profiler.is_enabled():
+                print(f"[Profiling] Enabled at level: {args.profiling_level}")
+        except KeyError:
+            print(f"[Profiling] Warning: Invalid profiling level '{args.profiling_level}', using DISABLED")
+            profiler.set_level(ProfilingLevel.DISABLED)
 
     if args.mp_distributed:
         # ------------------------------------------------------------------

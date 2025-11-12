@@ -31,6 +31,7 @@ from src.utils.train_utils import (
     apply_masks_from_idx,
     get_dist,
 )
+from src.utils.profiler import get_profiler
 from tqdm import tqdm
 import mlflow
 import tempfile
@@ -164,6 +165,9 @@ class Trainer:
         base_params.update(args_params)
         self.mlflow_params = base_params
 
+        # Initialize profiler
+        self.profiler = get_profiler()
+
 
     def train(
         self,
@@ -198,453 +202,484 @@ class Trainer:
                 mlflow.log_params(system_metrics)
 
             while self.epoch < self.num_epoch:
-                collapse_metrics = None
-                linear_probe_metric = 0
-                probe_val_metrics = {}
-                if self.probe_cadence > 0 and self.epoch % self.probe_cadence == 0:
-                    print(f"Running probe at epoch {self.epoch}")
+                with self.profiler.profile("epoch", epoch=self.epoch):
+                    collapse_metrics = None
+                    linear_probe_metric = 0
+                    probe_val_metrics = {}
+                    if self.probe_cadence > 0 and self.epoch % self.probe_cadence == 0:
+                        print(f"Running probe at epoch {self.epoch}")
 
-                    online_dataset_args: OnlineDatasetArgs = {
-                        "data_set": self.dataset.dataset_name,
-                        "data_path": self.args.data_path,
-                        "batch_size": 512, # TODO: Make this dynamic
-                        "data_loader_nprocs": self.args.data_loader_nprocs,
-                        "pin_memory": self.args.pin_memory,
-                        "mock": self.args.mock,
-                        "test_size_ratio": 0,
-                        "random_state": self.args.np_seed,
-                        "val_size_ratio": 0,
-                        "full_dataset_cuda": self.args.full_dataset_cuda,
-                        "val_batch_size": self.args.val_batch_size,
-                        "input_embed_dim": self.args.model_dim_hidden,
-                        "n_reg_tokens": self.args.n_reg_tokens,
-                    }
-                    online_dataset_args = Namespace(**online_dataset_args)
-                    online_dataset = OnlineDataset(
-                        online_dataset_args,
-                        self.target_encoder,
-                    )
-                    online_dataset.load()
-
-                    X = online_dataset.X
-
-                    rnd_sample = np.random.randint(0, X.shape[0])
-                    sampled_data_1 = X[0]
-                    sampled_data_2 = X[rnd_sample]
-
-                    imgs = torch.stack(
-                        [
-                            torch.tensor(sampled_data_1),
-                            torch.tensor(sampled_data_2),
-                        ]
-                    )
-
-                    def apply_colormap(img_tensor, colormap="viridis"):
-                        import matplotlib.pyplot as plt
-
-                        img_np = img_tensor.numpy()
-
-                        img_norm = (img_np - img_np.min()) / (img_np.max() - img_np.min())
-
-                        cmap = plt.get_cmap(colormap)
-                        img_colormap = cmap(img_norm)[:, :, :3]
-
-                        img_colormap_tensor = torch.tensor(img_colormap).permute(2, 0, 1)
-                        return img_colormap_tensor
-
-                    colored_imgs = torch.stack([apply_colormap(img) for img in imgs])
-
-                    img_grid = torchvision.utils.make_grid(
-                        colored_imgs,
-                        nrow=2,
-                    )
-
-                    # Log the image grid as an artifact with MLflow (main process only)
-                    if self.is_main_process:
-                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpfile:
-                            torchvision.utils.save_image(img_grid, tmpfile.name)
-                            mlflow.log_artifact(
-                                tmpfile.name, artifact_path="embedding_images"
-                            )
-
-                    collapse_metrics = {
-                        "KL": [],
-                        "euclidean": [],
-                        "intra_feature_variance": np.mean(np.var(X, axis=0)),
-                        "inter_feature_variance": np.var(X.mean(axis=1)),
-                    }
-
-                    for _ in range(20):
-                        m = self.get_collapse_metrics(X)
-                        collapse_metrics["KL"].append(m["KL"])
-                        collapse_metrics["euclidean"].append(m["euclidean"])
-
-                    collapse_metrics["KL"] = np.mean(collapse_metrics["KL"])
-                    collapse_metrics["euclidean"] = np.mean(collapse_metrics["euclidean"])
-
-                    model_class: BaseModel = MODEL_NAME_TO_MODEL_MAP[self.probe_model]
-
-                    device = "cuda:0" if torch.cuda.is_available() else "cpu"
-                    dataset_args = vars(online_dataset_args).copy()
-                    dataset_args.update(
-                        {
-                            "test_size_ratio": 0.1,
-                            "val_size_ratio": 0.1,
-                            "batch_size": 128,
-                            "task_type": online_dataset.task_type,
-                            "using_embedding": True,
-                            "exp_train_total_epochs": 200 if not self.args.test else 1,
-                            "model_name": self.probe_model,
-                            "dataset_name": online_dataset_args.data_set,
-                            "exp_patience": 50,
-                            "n_cls_tokens": self.args.n_cls_tokens,
+                        online_dataset_args: OnlineDatasetArgs = {
+                            "data_set": self.dataset.dataset_name,
+                            "data_path": self.args.data_path,
+                            "batch_size": 512, # TODO: Make this dynamic
+                            "data_loader_nprocs": self.args.data_loader_nprocs,
+                            "pin_memory": self.args.pin_memory,
+                            "mock": self.args.mock,
+                            "test_size_ratio": 0,
+                            "random_state": self.args.np_seed,
+                            "val_size_ratio": 0,
+                            "full_dataset_cuda": self.args.full_dataset_cuda,
+                            "val_batch_size": self.args.val_batch_size,
+                            "input_embed_dim": self.args.model_dim_hidden,
+                            "n_reg_tokens": self.args.n_reg_tokens,
                         }
-                    )
-                    dataset_args = Namespace(**dataset_args)
-
-                    datamodule = DataModule(
-                        dataset=online_dataset,
-                        test_size_ratio=dataset_args.test_size_ratio,
-                        val_size_ratio=dataset_args.val_size_ratio,
-                        random_state=dataset_args.random_state,
-                        device=device,
-                        batch_size=dataset_args.batch_size,
-                        workers=dataset_args.data_loader_nprocs,
-                        pin_memory=dataset_args.pin_memory,
-                        full_dataset_cuda=dataset_args.full_dataset_cuda,
-                        preprocessing=model_class.preprocessing,
-                        mock=dataset_args.mock,
-                        using_embedding=True,
-                    )
-
-                    base_config = {
-                        "dataset_name": self.args.data_set,
-                        "encoder_type": "linear_flatten",
-                    }
-                    model_args = json.load(
-                        open(
-                            MODEL_CONFIG_BASE_PATH.format(
-                                dataset_name=self.args.data_set,
-                                model_name=self.probe_model,
-                            )
+                        online_dataset_args = Namespace(**online_dataset_args)
+                        online_dataset = OnlineDataset(
+                            online_dataset_args,
+                            self.target_encoder,
                         )
-                    )
-                    model_args.update(base_config)
-                    model_args = Namespace(**model_args)
+                        online_dataset.load()
 
-                    model_args = model_class.get_model_args(
-                        datamodule,
-                        dataset_args,
-                        model_args,
-                    )
-                    print(f"Loading {self.probe_model}")
-                    print(
-                        tabulate(
-                            sorted(list(vars(model_args).items()), key=lambda x: x[0]),
-                            tablefmt="fancy_grid",
+                        X = online_dataset.X
+
+                        rnd_sample = np.random.randint(0, X.shape[0])
+                        sampled_data_1 = X[0]
+                        sampled_data_2 = X[rnd_sample]
+
+                        imgs = torch.stack(
+                            [
+                                torch.tensor(sampled_data_1),
+                                torch.tensor(sampled_data_2),
+                            ]
                         )
-                    )
 
-                    loss_fn = get_loss_from_task(dataset_args.task_type)
-                    dataset_args = {**vars(dataset_args), **vars(model_args)}
-                    model = model_class(loss=loss_fn, **dataset_args)
-                    summary(model, input_size=model_args.summary_input)
-                    model = model.float()
+                        def apply_colormap(img_tensor, colormap="viridis"):
+                            import matplotlib.pyplot as plt
 
-                    # Create a descriptive run name for the linear probe
-                    probe_run_name = f"{self.job_name}_epoch_{self.epoch}_probe"
+                            img_np = img_tensor.numpy()
 
-                    # Gather all relevant parameters for logging
-                    probe_run_params = {
-                        **dataset_args,
-                        "parent_run_name": self.job_name,
-                        "parent_epoch": self.epoch,
-                    }
+                            img_norm = (img_np - img_np.min()) / (img_np.max() - img_np.min())
 
-                    callbacks, loggers = set_callbacks_loggers(
-                        dataset_args, run_name=probe_run_name, run_params=probe_run_params
-                    )
+                            cmap = plt.get_cmap(colormap)
+                            img_colormap = cmap(img_norm)[:, :, :3]
 
-                    trainer = pl.Trainer(
-                        max_epochs=dataset_args["exp_train_total_epochs"],
-                        logger=loggers,
-                        callbacks=callbacks,
-                        log_every_n_steps=10,
-                        strategy="ddp",
-                        devices=-1,
-                    )
+                            img_colormap_tensor = torch.tensor(img_colormap).permute(2, 0, 1)
+                            return img_colormap_tensor
 
-                    trainer.fit(model, datamodule=datamodule)
+                        colored_imgs = torch.stack([apply_colormap(img) for img in imgs])
 
-                    # ALL ranks must participate in validation and testing to avoid deadlocks.
-                    val_metrics_list = trainer.validate(model, datamodule=datamodule)
-                    trainer.test(model, datamodule=datamodule)
-                    
-                    # Only process and log metrics on the main rank
-                    if self.is_main_process:
-                        linear_probe_metric = val_metrics_list[0][
-                            f"{self.args.data_set}_val_score"
-                        ]
-                        # Add a prefix to all probe validation metrics for clarity in the main run
-                        probe_val_metrics = {f"probe/{k}": v for k, v in val_metrics_list[0].items()}
-                    
-                    # Broadcast the metric from the main process to all other processes.
-                    # First, create a tensor on the correct device for all processes.
-                    metric_tensor = torch.tensor(linear_probe_metric if self.is_main_process else 0.0, device=self.device)
-                    if self.is_distributed:
-                        dist.broadcast(metric_tensor, src=0)
-                    linear_probe_metric = metric_tensor.item()
+                        img_grid = torchvision.utils.make_grid(
+                            colored_imgs,
+                            nrow=2,
+                        )
 
-                    # Add a barrier to ensure all processes sync up before continuing.
-                    if self.is_distributed:
-                        dist.barrier()
-
-
-                start_time = datetime.now()
-                to_print = f"Training epoch: {self.epoch+1}/{self.num_epoch}"
-                if self.is_main_process:
-                    print(f"{to_print:#^80}")
-
-                if self.is_distributed:
-                    # Ensure shuffling is synchronized across epochs.
-                    if hasattr(self.dataloader, "sampler") and hasattr(self.dataloader.sampler, "set_epoch"):
-                        self.dataloader.sampler.set_epoch(self.epoch)
-                    elif hasattr(self.dataloader, "set_epoch"):
-                        self.dataloader.set_epoch(self.epoch)
-                total_loss = torch.zeros(1, device=self.device)
-
-                for itr, (batch, masks_enc, masks_pred) in enumerate(tqdm(self.dataloader)):
-
-                    batch = batch.to(self.device, non_blocking=True)
-                    masks_enc = [
-                        mask.to(self.device, non_blocking=True) for mask in masks_enc
-                    ]
-                    masks_pred = [
-                        mask.to(self.device, non_blocking=True) for mask in masks_pred
-                    ]
-
-                    with torch.autocast(device_type=self.device.type, enabled=self.args.model_amp):
-                        # target forward
-                        with torch.no_grad():
-
-                            _debug_values(batch[0].T, "batch[0]")
-                            # Target encocccccbvefivhblvucikbrjleujicuggufkgcctdjbvbv
-                            # der sees ALL features (no mask passed)
-                            h = self.target_encoder(batch)
-                            _debug_values(h[0].T, "h[0] after target_encoder")
-                            
-                            # Step 1: Remove REG tokens from target encoder output
-                            if self.args.n_reg_tokens > 0:
-                                h_no_reg = h[:, :-self.args.n_reg_tokens, :]
-                            else:
-                                h_no_reg = h
-                            
-                            # Step 2: Split CLS and features
-                            h_cls = h_no_reg[:, :self.args.n_cls_tokens, :]  # CLS tokens
-                            h_features = h_no_reg[:, self.args.n_cls_tokens:, :]  # All features
-                            
-                            # Step 3: Apply masks to features only
-                            h_masked_features = apply_masks_from_idx(h_features, masks_pred)
-                            
-                            # Step 4: Reconstruct with CLS prepended to masked features
-                            # Expand CLS to match the number of mask predictions
-                            h_cls_expanded = h_cls.repeat(len(masks_pred), 1, 1)
-                            h = torch.cat([h_cls_expanded, h_masked_features], dim=1)
-                            
-                            _debug_values(h[0].T, "h[0] after masking (CLS and REG removed)")
-
-                        # Context encoder with masks (masks now include CLS offset)
-                        z = self.context_encoder(batch, masks_enc)
-                        _debug_values(z[0].T, "z[0] after context_encoder")
-                        
-                        # Context encoder output: [CLS, masked_features, REG]
-                        # Remove REG token before prediction (keep CLS token)
-                        if self.args.n_reg_tokens > 0:
-                            z_for_pred = z[:, :-self.args.n_reg_tokens, :]  # Remove REG only
-                        else:
-                            z_for_pred = z
-                        
-                        if self.args.pred_type == "mlp":
-                            z_for_pred = z_for_pred.view(z_for_pred.size(0), -1)  # flatten
-                            z_pred = self.predictors(z_for_pred, masks_pred.transpose(0, 1))
-                            loss = torch.zeros(1, device=self.device)
-                            for z_, h_ in zip(z_pred, h):
-                                loss += self.loss_fn(z_, h_)
-
-                        else:  # Transformer predictor 
-                            # Pass [CLS, masked_features] to predictor (REG already removed)
-                            # Masks already account for CLS tokens
-                            z_pred = self.predictors(z_for_pred, masks_enc, masks_pred)
-                            _debug_values(z_pred[0].T, "z_pred after predictors")
-                            loss = self.loss_fn(z_pred, h)
-
-                        # Synchronise gradients via DDP; we only need to
-                        # reduce the loss tensor for logging/metrics.
-                        loss_value = loss.detach()
-                        if self.is_distributed:
-                            dist.all_reduce(loss_value, op=dist.ReduceOp.AVG)
-
-                        if self.args.model_amp:
-                            self.scaler.scale(loss).backward()
-                            self.scaler.step(self.optimizer)
-                            self.scaler.update()
-                        else:
-                            loss.backward()
-                            self.optimizer.step()
-
-                        assert not np.isnan(loss.item()), "loss is NaN"
-
-                        if itr == 0:
-                            ctx_grads = []
-                            for param in self.context_encoder.parameters():
-                                if param.grad is not None:
-                                    ctx_grads.append(param.grad.flatten())
-                            ctx_grads = (
-                                torch.cat(ctx_grads)
-                                if len(ctx_grads) > 0
-                                else torch.tensor([])
-                            )
-                            ctx_grads = ctx_grads.cpu().detach().numpy()
-
-                            trgt_grads = []
-                            for param in self.target_encoder.parameters():
-                                if param.grad is not None:
-                                    trgt_grads.append(param.grad.flatten())
-                            trgt_grads = (
-                                torch.cat(trgt_grads)
-                                if len(trgt_grads) > 0
-                                else torch.tensor([])
-                            )
-                            trgt_grads = trgt_grads.cpu().detach().numpy()
-
-                            pred_grads = []
-                            for param in self.predictors.parameters():
-                                if param.grad is not None:
-                                    pred_grads.append(param.grad.flatten())
-                            pred_grads = (
-                                torch.cat(pred_grads)
-                                if len(pred_grads) > 0
-                                else torch.tensor([])
-                            )
-                            pred_grads = pred_grads.cpu().detach().numpy()
-
-                            # Log gradient statistics with MLflow (mean and std)
-                            grad_metrics = {
-                                "grad/context_encoder_grad_mean": float(np.mean(ctx_grads)) if ctx_grads.size > 0 else 0.0,
-                                "grad/context_encoder_grad_l2": float(np.linalg.norm(ctx_grads)) if ctx_grads.size > 0 else 0.0,
-                                "grad/context_encoder_grad_std": float(np.std(ctx_grads)) if ctx_grads.size > 0 else 0.0,
-                                "grad/target_encoder_grad_mean": float(np.mean(trgt_grads)) if trgt_grads.size > 0 else 0.0,
-                                "grad/target_encoder_grad_l2": float(np.linalg.norm(trgt_grads)) if trgt_grads.size > 0 else 0.0,
-                                "grad/target_encoder_grad_std": float(np.std(trgt_grads)) if trgt_grads.size > 0 else 0.0,
-                                "grad/predictor_grad_mean": float(np.mean(pred_grads)) if pred_grads.size > 0 else 0.0,
-                                "grad/predictor_grad_l2": float(np.linalg.norm(pred_grads)) if pred_grads.size > 0 else 0.0,
-                                "grad/predictor_grad_std": float(np.std(pred_grads)) if pred_grads.size > 0 else 0.0,
-                            }
-                            if self.is_main_process:
-                                mlflow.log_metrics(
-                                    grad_metrics,
-                                    step=itr + self.epoch * len(self.dataloader),
+                        # Log the image grid as an artifact with MLflow (main process only)
+                        if self.is_main_process:
+                            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpfile:
+                                torchvision.utils.save_image(img_grid, tmpfile.name)
+                                mlflow.log_artifact(
+                                    tmpfile.name, artifact_path="embedding_images"
                                 )
 
-                        self.optimizer.zero_grad()
-                        if self.is_main_process and self.log_tb:
-                            self.writer.add_scalar(
-                                f"train/loss", loss_value.item(), itr * (self.epoch + 1)
+                        collapse_metrics = {
+                            "KL": [],
+                            "euclidean": [],
+                            "intra_feature_variance": np.mean(np.var(X, axis=0)),
+                            "inter_feature_variance": np.var(X.mean(axis=1)),
+                        }
+
+                        for _ in range(20):
+                            m = self.get_collapse_metrics(X)
+                            collapse_metrics["KL"].append(m["KL"])
+                            collapse_metrics["euclidean"].append(m["euclidean"])
+
+                        collapse_metrics["KL"] = np.mean(collapse_metrics["KL"])
+                        collapse_metrics["euclidean"] = np.mean(collapse_metrics["euclidean"])
+
+                        model_class: BaseModel = MODEL_NAME_TO_MODEL_MAP[self.probe_model]
+
+                        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+                        dataset_args = vars(online_dataset_args).copy()
+                        dataset_args.update(
+                            {
+                                "test_size_ratio": 0.1,
+                                "val_size_ratio": 0.1,
+                                "batch_size": 128,
+                                "task_type": online_dataset.task_type,
+                                "using_embedding": True,
+                                "exp_train_total_epochs": 200 if not self.args.test else 1,
+                                "model_name": self.probe_model,
+                                "dataset_name": online_dataset_args.data_set,
+                                "exp_patience": 50,
+                                "n_cls_tokens": self.args.n_cls_tokens,
+                            }
+                        )
+                        dataset_args = Namespace(**dataset_args)
+
+                        datamodule = DataModule(
+                            dataset=online_dataset,
+                            test_size_ratio=dataset_args.test_size_ratio,
+                            val_size_ratio=dataset_args.val_size_ratio,
+                            random_state=dataset_args.random_state,
+                            device=device,
+                            batch_size=dataset_args.batch_size,
+                            workers=dataset_args.data_loader_nprocs,
+                            pin_memory=dataset_args.pin_memory,
+                            full_dataset_cuda=dataset_args.full_dataset_cuda,
+                            preprocessing=model_class.preprocessing,
+                            mock=dataset_args.mock,
+                            using_embedding=True,
+                        )
+
+                        base_config = {
+                            "dataset_name": self.args.data_set,
+                            "encoder_type": "linear_flatten",
+                        }
+                        model_args = json.load(
+                            open(
+                                MODEL_CONFIG_BASE_PATH.format(
+                                    dataset_name=self.args.data_set,
+                                    model_name=self.probe_model,
+                                )
                             )
-                        total_loss += loss_value
+                        )
+                        model_args.update(base_config)
+                        model_args = Namespace(**model_args)
 
-                        # Step 3. momentum update of target encoder
-                        with torch.no_grad():
-                            m = next(self.momentum_scheduler)
-                            for param_q, param_k in zip(
-                                self.context_encoder.parameters(),
-                                self.target_encoder.parameters(),
-                            ):
-                                param_k.data.mul_(m).add_((1.0 - m) * param_q.detach().data)
+                        model_args = model_class.get_model_args(
+                            datamodule,
+                            dataset_args,
+                            model_args,
+                        )
+                        print(f"Loading {self.probe_model}")
+                        print(
+                            tabulate(
+                                sorted(list(vars(model_args).items()), key=lambda x: x[0]),
+                                tablefmt="fancy_grid",
+                            )
+                        )
 
-                        if self.scheduler is not None:
-                            self.scheduler.step()
+                        loss_fn = get_loss_from_task(dataset_args.task_type)
+                        dataset_args = {**vars(dataset_args), **vars(model_args)}
+                        model = model_class(loss=loss_fn, **dataset_args)
+                        summary(model, input_size=model_args.summary_input)
+                        model = model.float()
 
-                        if self.weight_decay_scheduler is not None:
-                            self.weight_decay_scheduler.step()
+                        # Create a descriptive run name for the linear probe
+                        probe_run_name = f"{self.job_name}_epoch_{self.epoch}_probe"
 
-                end_time = datetime.now()
-                total_epoch_time = (end_time - start_time).total_seconds()
-                self.total_train_time += total_epoch_time
-                self.epoch_time.append(total_epoch_time)
+                        # Gather all relevant parameters for logging
+                        probe_run_params = {
+                            **dataset_args,
+                            "parent_run_name": self.job_name,
+                            "parent_epoch": self.epoch,
+                        }
 
-                args_early_stop = {
-                    "train_loss": total_loss.item(),
-                    "context_encoder": self.context_encoder,
-                    "target_encoder": self.target_encoder,
-                    "predictor": self.predictors,
-                    "optimizer": self.optimizer,
-                    "scaler": self.scaler,
-                    "scheduler": self.scheduler,
-                    "weightdecay_scheduler": self.weight_decay_scheduler,
-                    "epoch": self.epoch,
-                    "end_experiment": (self.epoch == self.num_epoch),
-                    "val_score": linear_probe_metric if linear_probe_metric != 0 else None,
-                }
+                        callbacks, loggers = set_callbacks_loggers(
+                            dataset_args, run_name=probe_run_name, run_params=probe_run_params
+                        )
 
-                log_dict = {
-                    "train/loss": total_loss.item(),
-                    "train/epoch": self.epoch,
-                    "sys/time_per_epoch": total_epoch_time,
-                    "train/lr": self.scheduler.get_last_lr()[0],
-                    "train/momentum": m,
-                    "train/weight_decay": self.weight_decay_scheduler.get_last_wd()[0],
-                    "val/linear_probe_metric": linear_probe_metric,
-                }
-                if collapse_metrics is not None:
-                    # Add validation prefix to collapse metrics
-                    collapse_metrics_prefixed = {
-                        f"val/{k}": v for k, v in collapse_metrics.items()
+                        trainer = pl.Trainer(
+                            max_epochs=dataset_args["exp_train_total_epochs"],
+                            logger=loggers,
+                            callbacks=callbacks,
+                            log_every_n_steps=10,
+                            strategy="ddp",
+                            devices=-1,
+                        )
+
+                        trainer.fit(model, datamodule=datamodule)
+
+                        # ALL ranks must participate in validation and testing to avoid deadlocks.
+                        val_metrics_list = trainer.validate(model, datamodule=datamodule)
+                        trainer.test(model, datamodule=datamodule)
+                        
+                        # Only process and log metrics on the main rank
+                        if self.is_main_process:
+                            linear_probe_metric = val_metrics_list[0][
+                                f"{self.args.data_set}_val_score"
+                            ]
+                            # Add a prefix to all probe validation metrics for clarity in the main run
+                            probe_val_metrics = {f"probe/{k}": v for k, v in val_metrics_list[0].items()}
+                        
+                        # Broadcast the metric from the main process to all other processes.
+                        # First, create a tensor on the correct device for all processes.
+                        metric_tensor = torch.tensor(linear_probe_metric if self.is_main_process else 0.0, device=self.device)
+                        if self.is_distributed:
+                            dist.broadcast(metric_tensor, src=0)
+                        linear_probe_metric = metric_tensor.item()
+
+                        # Add a barrier to ensure all processes sync up before continuing.
+                        if self.is_distributed:
+                            dist.barrier()
+
+
+                    start_time = datetime.now()
+                    to_print = f"Training epoch: {self.epoch+1}/{self.num_epoch}"
+                    if self.is_main_process:
+                        print(f"{to_print:#^80}")
+
+                    if self.is_distributed:
+                        # Ensure shuffling is synchronized across epochs.
+                        if hasattr(self.dataloader, "sampler") and hasattr(self.dataloader.sampler, "set_epoch"):
+                            self.dataloader.sampler.set_epoch(self.epoch)
+                        elif hasattr(self.dataloader, "set_epoch"):
+                            self.dataloader.set_epoch(self.epoch)
+                    total_loss = torch.zeros(1, device=self.device)
+
+                    for itr, (batch, masks_enc, masks_pred) in enumerate(tqdm(self.dataloader)):
+                        with self.profiler.profile("iteration", iteration=itr):
+
+                            with self.profiler.profile("data_transfer"):
+                                batch = batch.to(self.device, non_blocking=True)
+                                masks_enc = [
+                                    mask.to(self.device, non_blocking=True) for mask in masks_enc
+                                ]
+                                masks_pred = [
+                                    mask.to(self.device, non_blocking=True) for mask in masks_pred
+                                ]
+
+                            with torch.autocast(device_type=self.device.type, enabled=self.args.model_amp):
+                                with self.profiler.profile("forward_pass"):
+                                    # target forward
+                                    with self.profiler.profile("target_encoder"):
+                                        with torch.no_grad():
+
+                                            _debug_values(batch[0].T, "batch[0]")
+                                            # Target encocccccbvefivhblvucikbrjleujicuggufkgcctdjbvbv
+                                            # der sees ALL features (no mask passed)
+                                            h = self.target_encoder(batch)
+                                _debug_values(h[0].T, "h[0] after target_encoder")
+                                
+                                # Step 1: Remove REG tokens from target encoder output
+                                if self.args.n_reg_tokens > 0:
+                                    h_no_reg = h[:, :-self.args.n_reg_tokens, :]
+                                else:
+                                    h_no_reg = h
+                                
+                                # Step 2: Split CLS and features
+                                h_cls = h_no_reg[:, :self.args.n_cls_tokens, :]  # CLS tokens
+                                h_features = h_no_reg[:, self.args.n_cls_tokens:, :]  # All features
+                                
+                                # Step 3: Apply masks to features only
+                                h_masked_features = apply_masks_from_idx(h_features, masks_pred)
+                                
+                                # Step 4: Reconstruct with CLS prepended to masked features
+                                # Expand CLS to match the number of mask predictions
+                                h_cls_expanded = h_cls.repeat(len(masks_pred), 1, 1)
+                                h = torch.cat([h_cls_expanded, h_masked_features], dim=1)
+
+                                _debug_values(h[0].T, "h[0] after masking (CLS and REG removed)")
+
+                            # Context encoder with masks (masks now include CLS offset)
+                            with self.profiler.profile("context_encoder"):
+                                z = self.context_encoder(batch, masks_enc)
+                                _debug_values(z[0].T, "z[0] after context_encoder")
+
+                            # Context encoder output: [CLS, masked_features, REG]
+                            # Remove REG token before prediction (keep CLS token)
+                            if self.args.n_reg_tokens > 0:
+                                z_for_pred = z[:, :-self.args.n_reg_tokens, :]  # Remove REG only
+                            else:
+                                z_for_pred = z
+
+                            with self.profiler.profile("predictor"):
+                                if self.args.pred_type == "mlp":
+                                    z_for_pred = z_for_pred.view(z_for_pred.size(0), -1)  # flatten
+                                    z_pred = self.predictors(z_for_pred, masks_pred.transpose(0, 1))
+
+                                else:  # Transformer predictor
+                                    # Pass [CLS, masked_features] to predictor (REG already removed)
+                                    # Masks already account for CLS tokens
+                                    z_pred = self.predictors(z_for_pred, masks_enc, masks_pred)
+                                    _debug_values(z_pred[0].T, "z_pred after predictors")
+
+                            with self.profiler.profile("loss_computation"):
+                                if self.args.pred_type == "mlp":
+                                    loss = torch.zeros(1, device=self.device)
+                                    for z_, h_ in zip(z_pred, h):
+                                        loss += self.loss_fn(z_, h_)
+                                else:
+                                    loss = self.loss_fn(z_pred, h)
+
+                            # Synchronise gradients via DDP; we only need to
+                            # reduce the loss tensor for logging/metrics.
+                            loss_value = loss.detach()
+                            if self.is_distributed:
+                                dist.all_reduce(loss_value, op=dist.ReduceOp.AVG)
+
+                            with self.profiler.profile("backward_pass"):
+                                if self.args.model_amp:
+                                    self.scaler.scale(loss).backward()
+                                else:
+                                    loss.backward()
+
+                            with self.profiler.profile("optimizer_step"):
+                                if self.args.model_amp:
+                                    self.scaler.step(self.optimizer)
+                                    self.scaler.update()
+                                else:
+                                    self.optimizer.step()
+
+                            assert not np.isnan(loss.item()), "loss is NaN"
+
+                            if itr == 0 and self.epoch % 10 == 0:  # Only log gradients every 10 epochs
+                                with self.profiler.profile("gradient_logging"):
+                                    ctx_grads = []
+                                    for param in self.context_encoder.parameters():
+                                        if param.grad is not None:
+                                            ctx_grads.append(param.grad.flatten())
+                                    ctx_grads = (
+                                        torch.cat(ctx_grads)
+                                        if len(ctx_grads) > 0
+                                        else torch.tensor([])
+                                    )
+                                    ctx_grads = ctx_grads.cpu().detach().numpy()
+
+                                    trgt_grads = []
+                                    for param in self.target_encoder.parameters():
+                                        if param.grad is not None:
+                                            trgt_grads.append(param.grad.flatten())
+                                    trgt_grads = (
+                                        torch.cat(trgt_grads)
+                                        if len(trgt_grads) > 0
+                                        else torch.tensor([])
+                                    )
+                                    trgt_grads = trgt_grads.cpu().detach().numpy()
+
+                                    pred_grads = []
+                                    for param in self.predictors.parameters():
+                                        if param.grad is not None:
+                                            pred_grads.append(param.grad.flatten())
+                                    pred_grads = (
+                                        torch.cat(pred_grads)
+                                        if len(pred_grads) > 0
+                                        else torch.tensor([])
+                                    )
+                                    pred_grads = pred_grads.cpu().detach().numpy()
+
+                                    # Log gradient statistics with MLflow (mean and std)
+                                    grad_metrics = {
+                                        "grad/context_encoder_grad_mean": float(np.mean(ctx_grads)) if ctx_grads.size > 0 else 0.0,
+                                        "grad/context_encoder_grad_l2": float(np.linalg.norm(ctx_grads)) if ctx_grads.size > 0 else 0.0,
+                                        "grad/context_encoder_grad_std": float(np.std(ctx_grads)) if ctx_grads.size > 0 else 0.0,
+                                        "grad/target_encoder_grad_mean": float(np.mean(trgt_grads)) if trgt_grads.size > 0 else 0.0,
+                                        "grad/target_encoder_grad_l2": float(np.linalg.norm(trgt_grads)) if trgt_grads.size > 0 else 0.0,
+                                        "grad/target_encoder_grad_std": float(np.std(trgt_grads)) if trgt_grads.size > 0 else 0.0,
+                                        "grad/predictor_grad_mean": float(np.mean(pred_grads)) if pred_grads.size > 0 else 0.0,
+                                        "grad/predictor_grad_l2": float(np.linalg.norm(pred_grads)) if pred_grads.size > 0 else 0.0,
+                                        "grad/predictor_grad_std": float(np.std(pred_grads)) if pred_grads.size > 0 else 0.0,
+                                    }
+                                    if self.is_main_process:
+                                        mlflow.log_metrics(
+                                            grad_metrics,
+                                            step=itr + self.epoch * len(self.dataloader),
+                                        )
+
+                            self.optimizer.zero_grad()
+                            if self.is_main_process and self.log_tb:
+                                self.writer.add_scalar(
+                                    f"train/loss", loss_value.item(), itr * (self.epoch + 1)
+                                )
+                            total_loss += loss_value
+
+                            # Step 3. momentum update of target encoder
+                            with self.profiler.profile("ema_update"):
+                                with torch.no_grad():
+                                    m = next(self.momentum_scheduler)
+                                    for param_q, param_k in zip(
+                                        self.context_encoder.parameters(),
+                                        self.target_encoder.parameters(),
+                                    ):
+                                        param_k.data.mul_(m).add_((1.0 - m) * param_q.detach().data)
+
+                            if self.scheduler is not None:
+                                self.scheduler.step()
+
+                            if self.weight_decay_scheduler is not None:
+                                self.weight_decay_scheduler.step()
+
+                    end_time = datetime.now()
+                    total_epoch_time = (end_time - start_time).total_seconds()
+                    self.total_train_time += total_epoch_time
+                    self.epoch_time.append(total_epoch_time)
+
+                    args_early_stop = {
+                        "train_loss": total_loss.item(),
+                        "context_encoder": self.context_encoder,
+                        "target_encoder": self.target_encoder,
+                        "predictor": self.predictors,
+                        "optimizer": self.optimizer,
+                        "scaler": self.scaler,
+                        "scheduler": self.scheduler,
+                        "weightdecay_scheduler": self.weight_decay_scheduler,
+                        "epoch": self.epoch,
+                        "end_experiment": (self.epoch == self.num_epoch),
+                        "val_score": linear_probe_metric if linear_probe_metric != 0 else None,
                     }
-                    log_dict.update(collapse_metrics_prefixed)
 
-                # MLflow expects scalar metrics; filter and cast appropriately
-                if self.is_main_process:
-                    log_dict.update(probe_val_metrics)
-                    mlflow_log_dict = {
-                        k: float(v) for k, v in log_dict.items() if np.isscalar(v)
+                    log_dict = {
+                        "train/loss": total_loss.item(),
+                        "train/epoch": self.epoch,
+                        "sys/time_per_epoch": total_epoch_time,
+                        "train/lr": self.scheduler.get_last_lr()[0],
+                        "train/momentum": m,
+                        "train/weight_decay": self.weight_decay_scheduler.get_last_wd()[0],
+                        "val/linear_probe_metric": linear_probe_metric,
                     }
-                    mlflow.log_metrics(mlflow_log_dict, step=self.epoch)
+                    if collapse_metrics is not None:
+                        # Add validation prefix to collapse metrics
+                        collapse_metrics_prefixed = {
+                            f"val/{k}": v for k, v in collapse_metrics.items()
+                        }
+                        log_dict.update(collapse_metrics_prefixed)
 
-                if self.is_main_process:
-                    (
-                        early_stop_signal,
-                        self.context_encoder,
-                        self.target_encoder,
-                        self.predictors,
-                        self.optimizer,
-                        self.scaler,
-                        self.scheduler,
-                        self.weight_decay_scheduler,
-                    ) = self.early_stop_counter.update(**args_early_stop)
+                    # MLflow expects scalar metrics; filter and cast appropriately
+                    if self.is_main_process:
+                        log_dict.update(probe_val_metrics)
+                        mlflow_log_dict = {
+                            k: float(v) for k, v in log_dict.items() if np.isscalar(v)
+                        }
+                        mlflow.log_metrics(mlflow_log_dict, step=self.epoch)
 
-                if self.is_distributed:
-                    # Broadcast the early_stop_signal from the main process to all other processes.
-                    signal_tensor = torch.tensor(
-                        early_stop_signal.value if self.is_main_process else 0,
-                        dtype=torch.int,
-                        device=self.device,
-                    )
-                    dist.broadcast(signal_tensor, src=0)
+                    if self.is_main_process:
+                        (
+                            early_stop_signal,
+                            self.context_encoder,
+                            self.target_encoder,
+                            self.predictors,
+                            self.optimizer,
+                            self.scaler,
+                            self.scheduler,
+                            self.weight_decay_scheduler,
+                        ) = self.early_stop_counter.update(**args_early_stop)
 
-                    if not self.is_main_process:
-                        early_stop_signal = EarlyStopSignal(signal_tensor.item())
+                    if self.is_distributed:
+                        # Broadcast the early_stop_signal from the main process to all other processes.
+                        signal_tensor = torch.tensor(
+                            early_stop_signal.value if self.is_main_process else 0,
+                            dtype=torch.int,
+                            device=self.device,
+                        )
+                        dist.broadcast(signal_tensor, src=0)
 
-                    dist.barrier()
+                        if not self.is_main_process:
+                            early_stop_signal = EarlyStopSignal(signal_tensor.item())
 
-                if early_stop_signal == EarlyStopSignal.STOP:
-                    if not (self.epoch == self.num_epoch):
-                        print(self.early_stop_counter.early_stop_signal_message)
-                        break
+                        dist.barrier()
+
+                    if early_stop_signal == EarlyStopSignal.STOP:
+                        if not (self.epoch == self.num_epoch):
+                            print(self.early_stop_counter.early_stop_signal_message)
+                            break
 
                 self.epoch += 1
 
+                # Print profiling summary periodically
+                if self.is_main_process and self.profiler.is_enabled() and self.epoch % 10 == 0:
+                    print(f"\n{'='*80}")
+                    print(f"PROFILING SUMMARY - Epoch {self.epoch}/{self.num_epoch}")
+                    print(f"{'='*80}")
+                    self.profiler.print_summary(top_k=20)
+
         print(f"Total training time took: {self.total_train_time} seconds")
+
+        # Save profiling results
+        if self.is_main_process and self.profiler.is_enabled():
+            profiling_file = f"profiling_{self.job_name}.json"
+            self.profiler.save_results(profiling_file)
+            self.profiler.log_to_mlflow(mlflow)
         # print(
         # "This amounts to an average epoch time of {avg_time}".format(
         # avg_time=self.total_train_time / sel
