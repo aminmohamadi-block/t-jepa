@@ -112,6 +112,14 @@ def build_parser():
         help="Name of the target column in parquet files.",
     )
     parser.add_argument(
+        "--parquet_task_type",
+        type=str,
+        default="binary_class",
+        choices=["binary_class", "multi_class", "regression"],
+        help="Task type for parquet dataset (used for linear probe evaluation). "
+        "Choices: binary_class, multi_class, regression.",
+    )
+    parser.add_argument(
         "--parquet_id_col",
         type=str,
         default="ID",

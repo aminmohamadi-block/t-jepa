@@ -209,22 +209,17 @@ class Trainer:
                     if self.probe_cadence > 0 and self.epoch % self.probe_cadence == 0:
                         print(f"Running probe at epoch {self.epoch}")
 
-                        online_dataset_args: OnlineDatasetArgs = {
-                            "data_set": self.dataset.dataset_name,
-                            "data_path": self.args.data_path,
-                            "batch_size": 512, # TODO: Make this dynamic
-                            "data_loader_nprocs": self.args.data_loader_nprocs,
-                            "pin_memory": self.args.pin_memory,
-                            "mock": self.args.mock,
-                            "test_size_ratio": 0,
-                            "random_state": self.args.np_seed,
-                            "val_size_ratio": 0,
-                            "full_dataset_cuda": self.args.full_dataset_cuda,
-                            "val_batch_size": self.args.val_batch_size,
-                            "input_embed_dim": self.args.model_dim_hidden,
-                            "n_reg_tokens": self.args.n_reg_tokens,
-                        }
-                        online_dataset_args = Namespace(**online_dataset_args)
+                        # Create args for OnlineDataset
+                        # Start with full args to include parquet-specific parameters
+                        online_dataset_args = Namespace(**vars(self.args))
+
+                        # Override specific fields for linear probe
+                        online_dataset_args.data_set = self.dataset.dataset_name
+                        online_dataset_args.batch_size = 512  # TODO: Make this dynamic
+                        online_dataset_args.test_size_ratio = 0
+                        online_dataset_args.random_state = self.args.np_seed
+                        online_dataset_args.val_size_ratio = 0
+                        online_dataset_args.input_embed_dim = self.args.model_dim_hidden
                         online_dataset = OnlineDataset(
                             online_dataset_args,
                             self.target_encoder,
