@@ -13,6 +13,7 @@ tensorboard
 rtdl_revisiting_models
 wandb
 mlflow
+pynvml
 polars
 pyarrow
 psutil
