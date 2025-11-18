@@ -207,13 +207,36 @@ def init_weights(m, init_type="trunc_normal"):
 
 def apply_masks_from_idx(x, masks):
     """
+    Optimized version using advanced indexing instead of gather.
+
     :param x: tensor of shape [B (batch-size), N (num-feature), D (feature-dim)]
     :param masks: list of tensors containing indices of feature rep in [N] to keep
+
+    Original implementation (kept for reference):
+        for m in masks:
+            mask_keep = m.unsqueeze(-1).repeat(1, 1, x.size(-1))  # Creates huge temp tensor
+            all_x += [torch.gather(x, dim=1, index=mask_keep)]
+
+    Optimized: Use advanced indexing to avoid creating large temporary tensors.
+    Instead of repeating mask across D dimension, use batch indices with advanced indexing.
     """
     all_x = []
+    B = x.size(0)
+
     for m in masks:
-        mask_keep = m.unsqueeze(-1).repeat(1, 1, x.size(-1))
-        all_x += [torch.gather(x, dim=1, index=mask_keep)]
+        # Create batch indices: [0, 1, 2, ..., B-1]
+        # Shape: [B, 1]
+        batch_idx = torch.arange(B, device=x.device).unsqueeze(1)
+
+        # Expand to match mask shape [B, 1] → [B, N_mask]
+        # This is a view operation (no memory allocation)
+        batch_idx = batch_idx.expand(-1, m.size(1))
+
+        # Advanced indexing: x[batch_idx, m] selects elements without large tensor
+        # batch_idx selects which batch, m selects which features
+        # Result: [B, N_mask, D] directly
+        all_x.append(x[batch_idx, m])
+
     return torch.cat(all_x, dim=0)
 
 

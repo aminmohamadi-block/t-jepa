@@ -57,6 +57,32 @@ class Tokenizer(nn.Module):
         if self.bias is not None:
             torch.nn.init.kaiming_uniform_(self.bias, a=math.sqrt(5))
 
+            # OPTIMIZATION: Pre-allocate zero tensors for bias padding
+            # These are reused in every forward pass instead of allocating new tensors
+            if self.n_cls_tokens > 0:
+                self.register_buffer(
+                    'bias_cls_zeros',
+                    torch.zeros(self.n_cls_tokens, d_token)
+                )
+            if self.n_reg_tokens > 0:
+                self.register_buffer(
+                    'bias_reg_zeros',
+                    torch.zeros(self.n_reg_tokens, d_token)
+                )
+
+        # OPTIMIZATION: Pre-allocate token templates for CLS and REG tokens
+        # These are reused in every forward pass with .expand() instead of creating new tensors
+        if self.n_cls_tokens > 0:
+            self.register_buffer(
+                'cls_token_template',
+                torch.ones(1, self.n_cls_tokens)
+            )
+        if self.n_reg_tokens > 0:
+            self.register_buffer(
+                'reg_token_template',
+                torch.ones(1, self.n_reg_tokens)
+            )
+
     @property
     def n_tokens(self) -> int:
         return len(self.weight) + (
@@ -82,15 +108,17 @@ class Tokenizer(nn.Module):
                 device = x_some.device
 
             # Concatenate [CLS] tokens, numerical features, and [REG] tokens
+            # OPTIMIZATION: Use pre-allocated templates with .expand() instead of torch.ones()
             special_tokens = []
             if self.n_cls_tokens > 0:
-                special_tokens.append(torch.ones(batch_size, self.n_cls_tokens, device=device))  # [CLS]
+                special_tokens.append(self.cls_token_template.expand(batch_size, -1))
             if x_num is not None:
                 special_tokens.append(x_num)
             if self.n_reg_tokens > 0:
-                special_tokens.append(torch.ones(batch_size, self.n_reg_tokens, device=device))  # [REG]
+                special_tokens.append(self.reg_token_template.expand(batch_size, -1))
 
-            x_num = torch.cat(special_tokens, dim=1)
+            with profiler.profile("concat_special_tokens"):
+                x_num = torch.cat(special_tokens, dim=1)
 
         with profiler.profile("linear_projection"):
             x = self.weight[None] * x_num[:, :, None]
@@ -106,13 +134,15 @@ class Tokenizer(nn.Module):
 
         if self.bias is not None:
             with profiler.profile("bias_addition"):
-                bias = torch.cat(
-                    [
-                        torch.zeros(self.n_cls_tokens, self.bias.shape[1], device=x.device),
-                        self.bias,
-                        torch.zeros(self.n_reg_tokens, self.bias.shape[1], device=x.device),
-                    ]
-                )
+                # OPTIMIZATION: Use pre-allocated zero buffers instead of creating new tensors
+                bias_parts = []
+                if self.n_cls_tokens > 0:
+                    bias_parts.append(self.bias_cls_zeros)
+                bias_parts.append(self.bias)
+                if self.n_reg_tokens > 0:
+                    bias_parts.append(self.bias_reg_zeros)
+
+                bias = torch.cat(bias_parts, dim=0)
                 x = x + bias[None]
         return x
 
@@ -209,6 +239,19 @@ class Encoder(nn.Module):
             print(
                 f"Using feature index embedding (unique embedding for " f"each column)."
             )
+
+            # OPTIMIZATION: Pre-allocate zero padding for CLS/REG tokens
+            # These are reused in every forward pass instead of allocating new tensors
+            if self.n_cls_tokens > 0:
+                self.register_buffer(
+                    'feature_index_cls_zeros',
+                    torch.zeros(1, self.n_cls_tokens, self.hidden_dim)
+                )
+            if self.n_reg_tokens > 0:
+                self.register_buffer(
+                    'feature_index_reg_zeros',
+                    torch.zeros(1, self.n_reg_tokens, self.hidden_dim)
+                )
         else:
             self.feature_index_embedding = None
 
@@ -314,21 +357,24 @@ class Encoder(nn.Module):
                 )
 
                 feature_index_embeddings = torch.unsqueeze(feature_index_embeddings, 0)
-
                 feature_index_embeddings = feature_index_embeddings.repeat(
                     out.size(0), 1, 1
                 )
 
                 # Add zeros for CLS and REG tokens, just like feature_type_embedding does
-                feature_index_embeddings = torch.cat(
-                    [
-                        torch.zeros(out.size(0), self.n_cls_tokens, self.hidden_dim).to(self.device),  # CLS tokens
-                        feature_index_embeddings,  # Feature embeddings
-                        torch.zeros(out.size(0), self.n_reg_tokens, self.hidden_dim).to(self.device),  # REG tokens
-                    ],
-                    dim=1,
-                )
+                # OPTIMIZATION: Use pre-allocated buffers with expand instead of creating zeros
+                feature_index_parts = []
+                if self.n_cls_tokens > 0:
+                    feature_index_parts.append(
+                        self.feature_index_cls_zeros.expand(out.size(0), -1, -1)
+                    )
+                feature_index_parts.append(feature_index_embeddings)
+                if self.n_reg_tokens > 0:
+                    feature_index_parts.append(
+                        self.feature_index_reg_zeros.expand(out.size(0), -1, -1)
+                    )
 
+                feature_index_embeddings = torch.cat(feature_index_parts, dim=1)
                 out = out + feature_index_embeddings
 
         if mask is not None:

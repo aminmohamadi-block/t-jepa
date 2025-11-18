@@ -307,18 +307,19 @@ class TransformerPredictor(nn.Module):
         with profiler.profile("positional_embedding_context"):
             # x contains [CLS, masked_features]
             # Get positional embeddings for these exact positions
-            x_pos_embed = self.predictor_pos_embed.repeat(B, 1, 1)
+            # OPTIMIZATION: Cache this expansion for reuse in mask_token_preparation
+            pos_embed_expanded = self.predictor_pos_embed.repeat(B, 1, 1)
 
             # Extract positional embeddings for [0:n_cls_tokens] + feature positions from masks_enc
             if self.n_cls_tokens > 0:
                 # CLS positions
-                cls_pos = x_pos_embed[:, :self.n_cls_tokens, :]
+                cls_pos = pos_embed_expanded[:, :self.n_cls_tokens, :]
                 # Feature positions (masks_enc contains indices 0 to n_features-1, we need to shift by n_cls_tokens)
                 feature_indices = [mask + self.n_cls_tokens for mask in masks_enc]
-                feature_pos = apply_masks_from_idx(x_pos_embed, feature_indices)
+                feature_pos = apply_masks_from_idx(pos_embed_expanded, feature_indices)
                 x_pos_embed = torch.cat([cls_pos, feature_pos], dim=1)
             else:
-                x_pos_embed = apply_masks_from_idx(x_pos_embed, masks_enc)
+                x_pos_embed = apply_masks_from_idx(pos_embed_expanded, masks_enc)
 
             _debug_values(x_pos_embed[0].T, title="Positional embedding")
 
@@ -329,7 +330,8 @@ class TransformerPredictor(nn.Module):
         _, N_ctxt, _ = x.shape
 
         with profiler.profile("mask_token_preparation"):
-            pos_embs = self.predictor_pos_embed.repeat(B, 1, 1)
+            # OPTIMIZATION: Reuse cached expansion instead of repeating
+            pos_embs = pos_embed_expanded
 
             _debug_values(pos_embs[0].T, title="Positional embedding before mask")
             # For prediction: we need [CLS_pos] + [target_feature_positions]

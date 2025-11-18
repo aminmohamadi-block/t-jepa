@@ -670,13 +670,13 @@ class Trainer:
                     print(f"{'='*80}")
                     self.profiler.print_summary(top_k=20)
 
-        print(f"Total training time took: {self.total_train_time} seconds")
+            # Save profiling results (MOVED INSIDE run_context to prevent orphaned MLflow run)
+            if self.is_main_process and self.profiler.is_enabled():
+                profiling_file = f"profiling_{self.job_name}.json"
+                self.profiler.save_results(profiling_file)
+                self.profiler.log_to_mlflow(mlflow)
 
-        # Save profiling results
-        if self.is_main_process and self.profiler.is_enabled():
-            profiling_file = f"profiling_{self.job_name}.json"
-            self.profiler.save_results(profiling_file)
-            self.profiler.log_to_mlflow(mlflow)
+        print(f"Total training time took: {self.total_train_time} seconds")
         # print(
         # "This amounts to an average epoch time of {avg_time}".format(
         # avg_time=self.total_train_time / sel
