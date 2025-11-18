@@ -436,24 +436,25 @@ class Trainer:
                                             # der sees ALL features (no mask passed)
                                             h = self.target_encoder(batch)
                                 _debug_values(h[0].T, "h[0] after target_encoder")
-                                
-                                # Step 1: Remove REG tokens from target encoder output
-                                if self.args.n_reg_tokens > 0:
-                                    h_no_reg = h[:, :-self.args.n_reg_tokens, :]
-                                else:
-                                    h_no_reg = h
-                                
-                                # Step 2: Split CLS and features
-                                h_cls = h_no_reg[:, :self.args.n_cls_tokens, :]  # CLS tokens
-                                h_features = h_no_reg[:, self.args.n_cls_tokens:, :]  # All features
-                                
-                                # Step 3: Apply masks to features only
-                                h_masked_features = apply_masks_from_idx(h_features, masks_pred)
-                                
-                                # Step 4: Reconstruct with CLS prepended to masked features
-                                # Expand CLS to match the number of mask predictions
-                                h_cls_expanded = h_cls.repeat(len(masks_pred), 1, 1)
-                                h = torch.cat([h_cls_expanded, h_masked_features], dim=1)
+
+                                with self.profiler.profile("target_masking"):
+                                    # Step 1: Remove REG tokens from target encoder output
+                                    if self.args.n_reg_tokens > 0:
+                                        h_no_reg = h[:, :-self.args.n_reg_tokens, :]
+                                    else:
+                                        h_no_reg = h
+
+                                    # Step 2: Split CLS and features
+                                    h_cls = h_no_reg[:, :self.args.n_cls_tokens, :]  # CLS tokens
+                                    h_features = h_no_reg[:, self.args.n_cls_tokens:, :]  # All features
+
+                                    # Step 3: Apply masks to features only
+                                    h_masked_features = apply_masks_from_idx(h_features, masks_pred)
+
+                                    # Step 4: Reconstruct with CLS prepended to masked features
+                                    # Expand CLS to match the number of mask predictions
+                                    h_cls_expanded = h_cls.repeat(len(masks_pred), 1, 1)
+                                    h = torch.cat([h_cls_expanded, h_masked_features], dim=1)
 
                                 _debug_values(h[0].T, "h[0] after masking (CLS and REG removed)")
 
@@ -462,12 +463,13 @@ class Trainer:
                                 z = self.context_encoder(batch, masks_enc)
                                 _debug_values(z[0].T, "z[0] after context_encoder")
 
-                            # Context encoder output: [CLS, masked_features, REG]
-                            # Remove REG token before prediction (keep CLS token)
-                            if self.args.n_reg_tokens > 0:
-                                z_for_pred = z[:, :-self.args.n_reg_tokens, :]  # Remove REG only
-                            else:
-                                z_for_pred = z
+                            with self.profiler.profile("context_preparation"):
+                                # Context encoder output: [CLS, masked_features, REG]
+                                # Remove REG token before prediction (keep CLS token)
+                                if self.args.n_reg_tokens > 0:
+                                    z_for_pred = z[:, :-self.args.n_reg_tokens, :]  # Remove REG only
+                                else:
+                                    z_for_pred = z
 
                             with self.profiler.profile("predictor"):
                                 if self.args.pred_type == "mlp":

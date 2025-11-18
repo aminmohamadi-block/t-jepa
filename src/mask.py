@@ -3,6 +3,7 @@ from multiprocessing import Value
 from tabulate import tabulate
 import torch
 import numpy as np
+from src.utils.profiler import get_profiler
 
 ## inspired from https://github.com/facebookresearch/ijepa/blob/main/src/masks/multiblock.py
 
@@ -87,40 +88,46 @@ class MaskCollator(object):
         return v
 
     def __call__(self, batch):
-        n_batch = len(batch)
+        profiler = get_profiler()
 
-        batch = [b[0] for b in batch]
-        n_features = len(batch[0])
+        with profiler.profile("mask_collation"):
+            with profiler.profile("batch_preprocessing"):
+                n_batch = len(batch)
+                batch = [b[0] for b in batch]
+                n_features = len(batch[0])
 
-        seed = self.step()
-        gen = torch.Generator()
-        gen.manual_seed(seed)
+            with profiler.profile("mask_sampling"):
+                seed = self.step()
+                gen = torch.Generator()
+                gen.manual_seed(seed)
 
-        n_mskd_cxt_ftrs, n_mskd_trgt_ftrs = math.inf, math.inf
-        while self.num_encs * n_mskd_cxt_ftrs + n_mskd_trgt_ftrs > self.num_features:
-            n_mskd_cxt_ftrs = self._sample_num_mask(
-                generator=gen, _min=self.min_context, _max=self.max_context
-            )[0]
-            n_mskd_trgt_ftrs = self._sample_num_mask(
-                generator=gen, _min=self.min_target, _max=self.max_target
-            )[0]
+                n_mskd_cxt_ftrs, n_mskd_trgt_ftrs = math.inf, math.inf
+                while self.num_encs * n_mskd_cxt_ftrs + n_mskd_trgt_ftrs > self.num_features:
+                    n_mskd_cxt_ftrs = self._sample_num_mask(
+                        generator=gen, _min=self.min_context, _max=self.max_context
+                    )[0]
+                    n_mskd_trgt_ftrs = self._sample_num_mask(
+                        generator=gen, _min=self.min_target, _max=self.max_target
+                    )[0]
 
-        mask_ctx = []
-        mask_trgt = []
-        for _ in range(n_batch):
-            m_ctx, m_trgt = self.create_masks(
-                int(n_mskd_cxt_ftrs),
-                int(n_mskd_trgt_ftrs),
-                n_features,
-                self.num_encs,
-                self.num_preds,
-            )
-            mask_ctx.append(m_ctx)
-            mask_trgt.append(m_trgt)
+            with profiler.profile("mask_creation"):
+                mask_ctx = []
+                mask_trgt = []
+                for _ in range(n_batch):
+                    m_ctx, m_trgt = self.create_masks(
+                        int(n_mskd_cxt_ftrs),
+                        int(n_mskd_trgt_ftrs),
+                        n_features,
+                        self.num_encs,
+                        self.num_preds,
+                    )
+                    mask_ctx.append(m_ctx)
+                    mask_trgt.append(m_trgt)
 
-        collated_masks_trgt = torch.utils.data.default_collate(mask_trgt)
-        collated_masks_ctx = torch.utils.data.default_collate(mask_ctx)
-        collated_batch = torch.utils.data.default_collate(batch)
+            with profiler.profile("batch_collation"):
+                collated_masks_trgt = torch.utils.data.default_collate(mask_trgt)
+                collated_masks_ctx = torch.utils.data.default_collate(mask_ctx)
+                collated_batch = torch.utils.data.default_collate(batch)
 
         return collated_batch, collated_masks_ctx, collated_masks_trgt
 
