@@ -425,6 +425,7 @@ class Trainer:
                                     mask.to(self.device, non_blocking=True) for mask in masks_pred
                                 ]
 
+                            # Autocast wraps ALL forward passes, loss, and backward
                             with torch.autocast(device_type=self.device.type, enabled=self.args.model_amp):
                                 with self.profiler.profile("forward_pass"):
                                     # target forward
@@ -458,49 +459,49 @@ class Trainer:
 
                                 _debug_values(h[0].T, "h[0] after masking (CLS and REG removed)")
 
-                            # Context encoder with masks (masks now include CLS offset)
-                            with self.profiler.profile("context_encoder"):
-                                z = self.context_encoder(batch, masks_enc)
-                                _debug_values(z[0].T, "z[0] after context_encoder")
+                                # Context encoder with masks (masks now include CLS offset)
+                                with self.profiler.profile("context_encoder"):
+                                    z = self.context_encoder(batch, masks_enc)
+                                    _debug_values(z[0].T, "z[0] after context_encoder")
 
-                            with self.profiler.profile("context_preparation"):
-                                # Context encoder output: [CLS, masked_features, REG]
-                                # Remove REG token before prediction (keep CLS token)
-                                if self.args.n_reg_tokens > 0:
-                                    z_for_pred = z[:, :-self.args.n_reg_tokens, :]  # Remove REG only
-                                else:
-                                    z_for_pred = z
+                                with self.profiler.profile("context_preparation"):
+                                    # Context encoder output: [CLS, masked_features, REG]
+                                    # Remove REG token before prediction (keep CLS token)
+                                    if self.args.n_reg_tokens > 0:
+                                        z_for_pred = z[:, :-self.args.n_reg_tokens, :]  # Remove REG only
+                                    else:
+                                        z_for_pred = z
 
-                            with self.profiler.profile("predictor"):
-                                if self.args.pred_type == "mlp":
-                                    z_for_pred = z_for_pred.view(z_for_pred.size(0), -1)  # flatten
-                                    z_pred = self.predictors(z_for_pred, masks_pred.transpose(0, 1))
+                                with self.profiler.profile("predictor"):
+                                    if self.args.pred_type == "mlp":
+                                        z_for_pred = z_for_pred.view(z_for_pred.size(0), -1)  # flatten
+                                        z_pred = self.predictors(z_for_pred, masks_pred.transpose(0, 1))
 
-                                else:  # Transformer predictor
-                                    # Pass [CLS, masked_features] to predictor (REG already removed)
-                                    # Masks already account for CLS tokens
-                                    z_pred = self.predictors(z_for_pred, masks_enc, masks_pred)
-                                    _debug_values(z_pred[0].T, "z_pred after predictors")
+                                    else:  # Transformer predictor
+                                        # Pass [CLS, masked_features] to predictor (REG already removed)
+                                        # Masks already account for CLS tokens
+                                        z_pred = self.predictors(z_for_pred, masks_enc, masks_pred)
+                                        _debug_values(z_pred[0].T, "z_pred after predictors")
 
-                            with self.profiler.profile("loss_computation"):
-                                if self.args.pred_type == "mlp":
-                                    loss = torch.zeros(1, device=self.device)
-                                    for z_, h_ in zip(z_pred, h):
-                                        loss += self.loss_fn(z_, h_)
-                                else:
-                                    loss = self.loss_fn(z_pred, h)
+                                with self.profiler.profile("loss_computation"):
+                                    if self.args.pred_type == "mlp":
+                                        loss = torch.zeros(1, device=self.device)
+                                        for z_, h_ in zip(z_pred, h):
+                                            loss += self.loss_fn(z_, h_)
+                                    else:
+                                        loss = self.loss_fn(z_pred, h)
 
-                            # Synchronise gradients via DDP; we only need to
-                            # reduce the loss tensor for logging/metrics.
-                            loss_value = loss.detach()
-                            if self.is_distributed:
-                                dist.all_reduce(loss_value, op=dist.ReduceOp.AVG)
+                                # Synchronise gradients via DDP; we only need to
+                                # reduce the loss tensor for logging/metrics.
+                                loss_value = loss.detach()
+                                if self.is_distributed:
+                                    dist.all_reduce(loss_value, op=dist.ReduceOp.AVG)
 
-                            with self.profiler.profile("backward_pass"):
-                                if self.args.model_amp:
-                                    self.scaler.scale(loss).backward()
-                                else:
-                                    loss.backward()
+                                with self.profiler.profile("backward_pass"):
+                                    if self.args.model_amp:
+                                        self.scaler.scale(loss).backward()
+                                    else:
+                                        loss.backward()
 
                             with self.profiler.profile("optimizer_step"):
                                 if self.args.model_amp:
