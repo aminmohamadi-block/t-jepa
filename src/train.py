@@ -201,7 +201,15 @@ class Trainer:
                 collapse_metrics = None
                 linear_probe_metric = 0
                 probe_val_metrics = {}
-                if self.probe_cadence > 0 and self.epoch % self.probe_cadence == 0:
+
+                # Check if we should run probe (ALL ranks check this condition)
+                should_run_probe = (
+                    self.probe_cadence > 0
+                    and self.epoch % self.probe_cadence == 0
+                )
+
+                # Linear probe runs ONLY on main process to avoid 4× memory duplication
+                if should_run_probe and self.is_main_process:
                     print(f"Running probe at epoch {self.epoch}")
 
                     # Create args for OnlineDataset
@@ -210,7 +218,7 @@ class Trainer:
 
                     # Override specific fields for linear probe
                     online_dataset_args.data_set = self.dataset.dataset_name
-                    online_dataset_args.batch_size = 512  # TODO: Make this dynamic
+                    online_dataset_args.batch_size = 4096  # Large batch size for fast embedding generation
                     online_dataset_args.test_size_ratio = 0
                     online_dataset_args.random_state = self.args.np_seed
                     online_dataset_args.val_size_ratio = 0
@@ -282,22 +290,26 @@ class Trainer:
 
                     device = "cuda:0" if torch.cuda.is_available() else "cpu"
                     dataset_args = vars(online_dataset_args).copy()
+
+                    # First, create dataset_args with basic config
+                    probe_epochs = 10 if not self.args.test else 1
                     dataset_args.update(
                         {
                             "test_size_ratio": 0.1,
                             "val_size_ratio": 0.1,
-                            "batch_size": 128,
+                            "batch_size": 4096,  # Large batch for fast probe training
                             "task_type": online_dataset.task_type,
                             "using_embedding": True,
-                            "exp_train_total_epochs": 50 if not self.args.test else 1,
+                            "exp_train_total_epochs": probe_epochs,
                             "model_name": self.probe_model,
                             "dataset_name": online_dataset_args.data_set,
-                            "exp_patience": 50,
+                            "exp_patience": 10,
                             "n_cls_tokens": self.args.n_cls_tokens,
                         }
                     )
                     dataset_args = Namespace(**dataset_args)
 
+                    # Create datamodule to calculate iterations_per_epoch
                     datamodule = DataModule(
                         dataset=online_dataset,
                         test_size_ratio=dataset_args.test_size_ratio,
@@ -312,6 +324,14 @@ class Trainer:
                         mock=dataset_args.mock,
                         using_embedding=True,
                     )
+
+                    # Setup datamodule to get train dataloader
+                    datamodule.setup("train")
+                    iterations_per_epoch = len(datamodule.train_dataloader())
+
+                    # Add num_epochs and iterations_per_epoch for proper LR scheduler
+                    dataset_args.num_epochs = probe_epochs
+                    dataset_args.iterations_per_epoch = iterations_per_epoch
 
                     base_config = {
                         "dataset_name": self.args.data_set,
@@ -366,35 +386,37 @@ class Trainer:
                         logger=loggers,
                         callbacks=callbacks,
                         log_every_n_steps=10,
-                        strategy="ddp",
-                        devices=-1,
+                        # Use auto strategy for single-device probe (runs only on rank 0)
+                        # Avoids conflict with parent DDP process group
+                        accelerator="gpu",
+                        devices=1,
                     )
 
                     trainer.fit(model, datamodule=datamodule)
 
-                    # ALL ranks must participate in validation and testing to avoid deadlocks.
+                    # Only rank 0 runs validation/testing (single-GPU probe, no DDP)
                     val_metrics_list = trainer.validate(model, datamodule=datamodule)
                     trainer.test(model, datamodule=datamodule)
-                    
-                    # Only process and log metrics on the main rank
-                    if self.is_main_process:
-                        linear_probe_metric = val_metrics_list[0][
-                            f"{self.args.data_set}_val_score"
-                        ]
-                        # Add a prefix to all probe validation metrics for clarity in the main run
-                        probe_val_metrics = {f"probe/{k}": v for k, v in val_metrics_list[0].items()}
-                    
-                    # Broadcast the metric from the main process to all other processes.
-                    # First, create a tensor on the correct device for all processes.
-                    metric_tensor = torch.tensor(linear_probe_metric if self.is_main_process else 0.0, device=self.device)
-                    if self.is_distributed:
-                        dist.broadcast(metric_tensor, src=0)
+
+                    # Extract probe metric
+                    linear_probe_metric = val_metrics_list[0][
+                        f"{self.args.data_set}_val_score"
+                    ]
+                    # Add a prefix to all probe validation metrics for clarity in the main run
+                    probe_val_metrics = {f"probe/{k}": v for k, v in val_metrics_list[0].items()}
+
+                # Synchronize probe results across all ranks (must be OUTSIDE the probe block!)
+                if should_run_probe and self.is_distributed:
+                    # Broadcast the metric from rank 0 to all other ranks
+                    metric_tensor = torch.tensor(
+                        linear_probe_metric if self.is_main_process else 0.0,
+                        device=self.device
+                    )
+                    dist.broadcast(metric_tensor, src=0)
                     linear_probe_metric = metric_tensor.item()
 
-                    # Add a barrier to ensure all processes sync up before continuing.
-                    if self.is_distributed:
-                        dist.barrier()
-
+                    # Barrier to ensure all ranks sync before continuing
+                    dist.barrier()
 
                 start_time = datetime.now()
                 to_print = f"Training epoch: {self.epoch+1}/{self.num_epoch}"

@@ -52,6 +52,22 @@ class OnlineDataset(BaseDataset):
             return
         self.dataset.load()
 
+        # For large datasets, use only last 10% for linear probe to reduce memory
+        # Data is unshuffled, so this is a deterministic temporal split
+        probe_sample_fraction = getattr(self.args, 'probe_sample_fraction', 0.1)
+        if probe_sample_fraction < 1.0:
+            n_total = self.dataset.N
+            n_probe = int(n_total * probe_sample_fraction)
+            start_idx = n_total - n_probe  # Take from the end
+
+            print(f"Using last {probe_sample_fraction*100:.0f}% of data for linear probe: "
+                  f"{n_probe:,} samples (from index {start_idx:,} to {n_total:,})")
+
+            # Slice the last 10% from the unshuffled dataset
+            self.dataset.X = self.dataset.X[start_idx:]
+            self.dataset.y = self.dataset.y[start_idx:]
+            self.dataset.N = n_probe
+
         self.target = self.dataset.y
         self.y = self.dataset.y
         self.task_type = self.dataset.task_type

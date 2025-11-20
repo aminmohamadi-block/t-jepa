@@ -1,0 +1,72 @@
+========================================================================
+Scaled Configuration Test - 4 GPUs with Linear Probe
+========================================================================
+Job ID: 14688
+Node: smallslurm-a38msp-0
+Date: Wed Nov 12 19:52:44 UTC 2025
+GPUs Requested: 4
+========================================================================
+Configuration:
+  - Data: chunk_10 to chunk_20 (11 files, 3.3M samples)
+  - Features: 128 → 256 (after categorize_nan)
+  - Batch size: 4096 per GPU (16384 total effective)
+  - Learning rate: 2.828e-4 (scaled by sqrt(8))
+  - Scaling: IQR + asinh transform
+  - Linear probe: Every 5 epochs on last 10% of data (330K samples, 20 epochs)
+========================================================================
+Hermit environment /home/aminmohamadi_squareup_com/projects activated
+Available GPUs:
+GPU 0: NVIDIA H100 80GB HBM3 (UUID: GPU-ad1de790-2739-9261-ed11-427725d9325a)
+GPU 1: NVIDIA H100 80GB HBM3 (UUID: GPU-c5daa3ca-fb46-98ab-0436-4476a56ce68f)
+GPU 2: NVIDIA H100 80GB HBM3 (UUID: GPU-bc21d6a9-bb2f-6841-d32d-cfc3a16411b7)
+GPU 3: NVIDIA H100 80GB HBM3 (UUID: GPU-2f63759e-98aa-05be-d059-07e52cf3e54d)
+
+Wed Nov 12 19:52:44 2025       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 550.90.12              Driver Version: 550.90.12      CUDA Version: 12.4     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100 80GB HBM3          On  |   00000000:0C:00.0 Off |                    0 |
+| N/A   29C    P0             69W /  700W |       1MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA H100 80GB HBM3          On  |   00000000:84:00.0 Off |                    0 |
+| N/A   29C    P0             72W /  700W |       1MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA H100 80GB HBM3          On  |   00000000:85:00.0 Off |                    0 |
+| N/A   27C    P0             69W /  700W |       1MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   3  NVIDIA H100 80GB HBM3          On  |   00000000:8C:00.0 Off |                    0 |
+| N/A   29C    P0             71W /  700W |       1MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+
+========================================================================
+SLURM Environment:
+========================================================================
+SLURM_GPUS: 4
+SLURM_JOB_GPUS: 3,4,5,7
+SLURM_STEP_GPUS: 
+SLURM_GPUS_ON_NODE: 4
+========================================================================
+
+========================================================================
+Starting 4-GPU T-JEPA training with scaled configuration...
+========================================================================
+[2025-11-12T19:52:45.822] error: *** JOB 14688 ON smallslurm-a38msp-0 CANCELLED AT 2025-11-12T19:52:45 DUE to SIGNAL Terminated ***
+[2025-11-12T19:52:45.822] error: *** STEP 14688.0 ON smallslurm-a38msp-0 CANCELLED AT 2025-11-12T19:52:45 DUE to SIGNAL Terminated ***
+srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
+srun: error: smallslurm-a38msp-0: task 0: Terminated
