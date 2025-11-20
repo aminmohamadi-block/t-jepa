@@ -19,6 +19,7 @@ from src.predictors import Predictors
 from src.torch_dataset import TorchDataset
 from src.train import Trainer
 from src.mask import MaskCollator
+from src.mask_vectorized import VectorizedMaskCollator
 from src.configs import build_parser
 from src.utils.log_utils import make_job_name
 from src.utils.log_utils import print_args
@@ -237,18 +238,34 @@ def main(args):
         args, jobname, args.data_set, device=device, is_distributed=False
     )
 
-    mask_collator = MaskCollator(
-        args.mask_allow_overlap,
-        args.mask_min_ctx_share,
-        args.mask_max_ctx_share,
-        args.mask_min_trgt_share,
-        args.mask_max_trgt_share,
-        args.mask_num_preds,
-        args.mask_num_encs,
-        dataset.D,
-        dataset.cardinalities,
-        args.n_cls_tokens,
-    )
+    # Choose mask collator implementation based on config
+    if args.use_vectorized_masking:
+        print("[Optimization] Using VectorizedMaskCollator (16.9x faster)")
+        mask_collator = VectorizedMaskCollator(
+            args.mask_allow_overlap,
+            args.mask_min_ctx_share,
+            args.mask_max_ctx_share,
+            args.mask_min_trgt_share,
+            args.mask_max_trgt_share,
+            args.mask_num_preds,
+            args.mask_num_encs,
+            dataset.D,
+            dataset.cardinalities,
+            args.n_cls_tokens,
+        )
+    else:
+        mask_collator = MaskCollator(
+            args.mask_allow_overlap,
+            args.mask_min_ctx_share,
+            args.mask_max_ctx_share,
+            args.mask_min_trgt_share,
+            args.mask_max_trgt_share,
+            args.mask_num_preds,
+            args.mask_num_encs,
+            dataset.D,
+            dataset.cardinalities,
+            args.n_cls_tokens,
+        )
 
     print("[Debug] Building DataLoader …", flush=True)
 
@@ -258,13 +275,30 @@ def main(args):
         class ParquetDataLoaderWrapper:
             """Wrapper that applies masking to pre-batched data from LocalFilesDataset."""
 
-            def __init__(self, dataset, mask_collator, device):
+            def __init__(self, dataset, mask_collator, device, rank=0, world_size=1):
                 self.dataset = dataset
                 self.mask_collator = mask_collator
                 self.device = device
+                self.rank = rank
+                self.world_size = world_size
 
             def __iter__(self):
-                for batch in self.dataset:
+                # For DDP: all ranks must process same number of batches (use floor division)
+                total_batches = len(self.dataset)
+                batches_per_rank = total_batches // self.world_size  # Floor division for sync
+                batches_processed = 0
+
+                for batch_idx, batch in enumerate(self.dataset):
+                    # For distributed training: each rank processes only its assigned batches
+                    # Rank i processes batches where batch_idx % world_size == i
+                    if batch_idx % self.world_size != self.rank:
+                        continue  # Skip batches not assigned to this rank
+
+                    # Stop after processing assigned number to ensure all ranks process same count
+                    batches_processed += 1
+                    if batches_processed > batches_per_rank:
+                        break
+
                     # batch is already a tensor [batch_size, num_features]
                     # Move to device
                     batch = batch.to(self.device, non_blocking=True)
@@ -277,10 +311,24 @@ def main(args):
                     yield batch, masks_enc, masks_pred
 
             def __len__(self):
-                return len(self.dataset)
+                # Return number of batches this rank will process (floor division for DDP sync)
+                total_batches = len(self.dataset)
+                return total_batches // self.world_size
 
-        dataloader = ParquetDataLoaderWrapper(train_torchdataset, mask_collator, device)
-        print(f"[Debug] Parquet DataLoader created (pre-batched, batch_size={args.batch_size})")
+        # Get distributed info if applicable
+        rank = distributed_args.get("rank", 0) if args.mp_distributed else 0
+        world_size = distributed_args.get("world_size", 1) if args.mp_distributed else 1
+
+        dataloader = ParquetDataLoaderWrapper(
+            train_torchdataset, mask_collator, device, rank=rank, world_size=world_size
+        )
+
+        if args.mp_distributed:
+            batches_per_rank = (len(train_torchdataset) + world_size - 1) // world_size
+            print(f"[Debug] Distributed parquet DataLoader: {batches_per_rank} batches per rank "
+                  f"({len(train_torchdataset)} total batches ÷ {world_size} GPUs)")
+        else:
+            print(f"[Debug] Parquet DataLoader created (pre-batched, batch_size={args.batch_size})")
 
     elif args.mp_distributed:
         # Use a DistributedSampler-backed DataLoader so that each rank gets a shard

@@ -303,8 +303,10 @@ class TransformerPredictor(nn.Module):
 
         # x contains [CLS, masked_features]
         # Get positional embeddings for these exact positions
-        x_pos_embed = self.predictor_pos_embed.repeat(B, 1, 1)
-        
+        # OPTIMIZATION: Cache this expansion for reuse later
+        pos_embed_expanded = self.predictor_pos_embed.repeat(B, 1, 1)
+        x_pos_embed = pos_embed_expanded
+
         # Extract positional embeddings for [0:n_cls_tokens] + feature positions from masks_enc
         if self.n_cls_tokens > 0:
             # CLS positions
@@ -324,7 +326,8 @@ class TransformerPredictor(nn.Module):
 
         _, N_ctxt, _ = x.shape
 
-        pos_embs = self.predictor_pos_embed.repeat(B, 1, 1)
+        # OPTIMIZATION: Reuse cached expansion instead of repeating
+        pos_embs = pos_embed_expanded
 
         _debug_values(pos_embs[0].T, title="Positional embedding before mask")
         # For prediction: we need [CLS_pos] + [target_feature_positions]

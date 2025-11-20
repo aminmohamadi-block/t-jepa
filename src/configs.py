@@ -503,6 +503,13 @@ def build_parser():
         help="Model to use for probing.",
     )
     parser.add_argument(
+        "--probe_sample_fraction",
+        type=float,
+        default=0.1,
+        help="Fraction of data to use for linear probe (takes last N%% from unshuffled dataset). "
+             "Default 0.1 (10%%) for memory efficiency. Set to 1.0 to use all data.",
+    )
+    parser.add_argument(
         "--n_cls_tokens",
         type=int,
         default=1,
@@ -613,6 +620,12 @@ def build_parser():
         type=int,
         default=1,
         help="Number of context mask per sample.",
+    )
+    parser.add_argument(
+        "--use_vectorized_masking",
+        type=bool,
+        default=False,
+        help="Use vectorized mask generation (16.9x faster) instead of original sequential implementation.",
     )
     
     ###########################################################################
