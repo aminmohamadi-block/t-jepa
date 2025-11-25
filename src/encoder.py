@@ -221,6 +221,18 @@ class Encoder(nn.Module):
                 f"Using feature type embedding (unique embedding for "
                 f"categorical and numerical features)."
             )
+            # OPTIMIZATION: Pre-allocate zero buffers for CLS/REG token padding
+            # These are reused in every forward pass with expand() instead of creating new tensors
+            if self.n_cls_tokens > 0:
+                self.register_buffer(
+                    'feature_type_cls_zeros',
+                    torch.zeros(1, self.n_cls_tokens, self.hidden_dim)
+                )
+            if self.n_reg_tokens > 0:
+                self.register_buffer(
+                    'feature_type_reg_zeros',
+                    torch.zeros(1, self.n_reg_tokens, self.hidden_dim)
+                )
         else:
             self.feature_type_embedding = None
 
@@ -337,16 +349,19 @@ class Encoder(nn.Module):
             with profiler.profile("feature_type_embedding"):
                 feature_type_embeddings = self.feature_type_embedding(self.feature_types)
                 feature_type_embeddings = torch.unsqueeze(feature_type_embeddings, 0)
-                feature_type_embeddings = feature_type_embeddings.repeat(out.size(0), 1, 1)
-                # Add zeros for CLS token, feature embeddings, and zeros for REG tokens
-                feature_type_embeddings = torch.cat(
-                    [
-                        torch.zeros(out.size(0), self.n_cls_tokens, self.hidden_dim).to(self.device),  # CLS tokens
-                        feature_type_embeddings,  # Feature embeddings
-                        torch.zeros(out.size(0), self.n_reg_tokens, self.hidden_dim).to(self.device),  # REG tokens
-                    ],
-                    dim=1,
-                )
+                feature_type_embeddings = feature_type_embeddings.expand(out.size(0), -1, -1)
+                # OPTIMIZATION: Use pre-allocated zero buffers with expand() instead of creating new tensors
+                feature_type_parts = []
+                if self.n_cls_tokens > 0:
+                    feature_type_parts.append(
+                        self.feature_type_cls_zeros.expand(out.size(0), -1, -1)
+                    )
+                feature_type_parts.append(feature_type_embeddings)
+                if self.n_reg_tokens > 0:
+                    feature_type_parts.append(
+                        self.feature_type_reg_zeros.expand(out.size(0), -1, -1)
+                    )
+                feature_type_embeddings = torch.cat(feature_type_parts, dim=1)
                 out = out + feature_type_embeddings
 
         # Apply feature_index_embedding BEFORE masking (same pattern as feature_type_embedding)
