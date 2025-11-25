@@ -1,3 +1,4 @@
+import math
 import numpy as np
 
 from tabulate import tabulate
@@ -55,18 +56,21 @@ class Predictors(nn.Module):
         self.n_cls_tokens = n_cls_tokens
 
         if self.pred_type == "mlp":
-            self.predictors = []
-            for _ in range(num_features):
-                self.predictors.append(
-                    MLP(
-                        self.hidden_dim * num_features,
-                        self.hidden_dim,
-                        self.num_layers,
-                        self.p_dropout,
-                        self.layer_norm_eps,
-                        self.activation,
-                    ).to(self.device)
+            # NOTE: MLP predictor uses variable context sizes due to masking.
+            # BatchedMLP requires fixed input dimensions and cannot be used with
+            # variable context sizes (3-6 features). Keep original list-based approach.
+            # BatchedMLP class is available for future use with fixed context sizes.
+            self.predictors = nn.ModuleList([
+                MLP(
+                    self.hidden_dim * num_features,
+                    self.hidden_dim,
+                    self.num_layers,
+                    self.p_dropout,
+                    self.layer_norm_eps,
+                    self.activation,
                 )
+                for _ in range(num_features)
+            ]).to(self.device)
         else:
             self.predictors = TransformerPredictor(
                 num_features=num_features,
@@ -110,7 +114,7 @@ class Predictors(nn.Module):
 
     def forward(self, x, masks_enc, masks_pred):
         if self.pred_type == "mlp":
-            return self.forward_mlp(x, masks_enc, masks_pred)
+            return self.forward_mlp(x, masks_pred)
         else:
             return self.forward_transformer(x, masks_enc, masks_pred)
 
@@ -216,6 +220,154 @@ class MLP(nn.Module):
         out = self.out_layer(x)
 
         return out
+
+
+class BatchedMLP(nn.Module):
+    """
+    Vectorized MLP that processes multiple features in parallel.
+
+    Instead of having num_features separate MLPs, this uses batched operations
+    to process all features simultaneously. Each feature still has its own weights,
+    but computations are parallelized using batched matrix multiplication.
+
+    Performance: Replaces 256 sequential MLP forward passes with a single batched operation.
+    """
+    def __init__(
+        self,
+        num_features: int,
+        input_dim: int,
+        hidden_dim: int,
+        out_dim: int,
+        num_layers: int,
+        p_dropout: float,
+        layer_norm_eps: float,
+        activation: str,
+    ):
+        super(BatchedMLP, self).__init__()
+
+        self.num_features = num_features
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.out_dim = out_dim
+        self.num_layers = num_layers
+        self.p_dropout = p_dropout
+        self.layer_norm_eps = layer_norm_eps
+
+        # Create activation function
+        if activation == "relu":
+            self.activation = nn.ReLU()
+        elif activation == "gelu":
+            self.activation = nn.GELU()
+        elif activation == "elu":
+            self.activation = nn.ELU()
+        else:
+            raise ValueError(f"Unknown activation: {activation}")
+
+        # Dropout (applied to all features)
+        self.dropout = nn.Dropout(p=p_dropout)
+
+        # Build layers
+        if num_layers > 1:
+            # Hidden layers: [num_features, hidden_dim, hidden_dim] for each layer
+            self.hidden_weights = nn.ParameterList()
+            self.hidden_biases = nn.ParameterList()
+            self.hidden_layernorms = nn.ModuleList()
+
+            # First hidden layer: input_dim -> hidden_dim
+            first_weight = nn.Parameter(torch.empty(num_features, input_dim, hidden_dim))
+            first_bias = nn.Parameter(torch.empty(num_features, hidden_dim))
+            nn.init.kaiming_uniform_(first_weight, a=math.sqrt(5))
+            fan_in = input_dim
+            bound = 1 / math.sqrt(fan_in)
+            nn.init.uniform_(first_bias, -bound, bound)
+            self.hidden_weights.append(first_weight)
+            self.hidden_biases.append(first_bias)
+            self.hidden_layernorms.append(nn.LayerNorm(hidden_dim, eps=layer_norm_eps))
+
+            # Remaining hidden layers: hidden_dim -> hidden_dim
+            for _ in range(num_layers - 2):
+                weight = nn.Parameter(torch.empty(num_features, hidden_dim, hidden_dim))
+                bias = nn.Parameter(torch.empty(num_features, hidden_dim))
+                nn.init.kaiming_uniform_(weight, a=math.sqrt(5))
+                fan_in = hidden_dim
+                bound = 1 / math.sqrt(fan_in)
+                nn.init.uniform_(bias, -bound, bound)
+                self.hidden_weights.append(weight)
+                self.hidden_biases.append(bias)
+                self.hidden_layernorms.append(nn.LayerNorm(hidden_dim, eps=layer_norm_eps))
+        else:
+            # Single layer case: input_dim -> hidden_dim
+            self.in_weight = nn.Parameter(torch.empty(num_features, input_dim, hidden_dim))
+            self.in_bias = nn.Parameter(torch.empty(num_features, hidden_dim))
+            nn.init.kaiming_uniform_(self.in_weight, a=math.sqrt(5))
+            fan_in = input_dim
+            bound = 1 / math.sqrt(fan_in)
+            nn.init.uniform_(self.in_bias, -bound, bound)
+            self.layernorm = nn.LayerNorm(hidden_dim, eps=layer_norm_eps)
+
+        # Output layer: hidden_dim -> out_dim
+        self.out_weight = nn.Parameter(torch.empty(num_features, hidden_dim, out_dim))
+        self.out_bias = nn.Parameter(torch.empty(num_features, out_dim))
+        nn.init.kaiming_uniform_(self.out_weight, a=math.sqrt(5))
+        fan_in = hidden_dim
+        bound = 1 / math.sqrt(fan_in)
+        nn.init.uniform_(self.out_bias, -bound, bound)
+
+    def forward(self, x):
+        """
+        Forward pass using batched matrix multiplication.
+
+        Args:
+            x: Input tensor of shape [B, input_dim]
+
+        Returns:
+            Output tensor of shape [B, num_features, out_dim]
+        """
+        # Expand input for all features: [B, input_dim] -> [B, num_features, input_dim]
+        x = x.unsqueeze(1).expand(-1, self.num_features, -1)
+
+        if self.num_layers > 1:
+            # Process through hidden layers
+            for weight, bias, layernorm in zip(self.hidden_weights, self.hidden_biases, self.hidden_layernorms):
+                # Batched matrix multiplication: [B, F, in] @ [F, in, out] -> [B, F, out]
+                # We need to align dimensions properly for bmm
+                # x: [B, F, in], weight: [F, in, out]
+                # Permute x to [F, B, in], multiply, then permute back
+                B = x.shape[0]
+                x = x.transpose(0, 1)  # [F, B, in]
+                x = torch.bmm(x, weight)  # [F, B, in] @ [F, in, out] -> [F, B, out]
+                x = x.transpose(0, 1)  # [B, F, out]
+
+                # Add bias: [F, out] -> [B, F, out]
+                x = x + bias.unsqueeze(0)
+
+                # Dropout (applied across all features)
+                x = self.dropout(x)
+
+                # LayerNorm (applied per feature)
+                x = layernorm(x)
+
+                # Activation
+                x = self.activation(x)
+        else:
+            # Single layer case
+            B = x.shape[0]
+            x = x.transpose(0, 1)  # [F, B, in]
+            x = torch.bmm(x, self.in_weight)  # [F, B, in] @ [F, in, hidden] -> [F, B, hidden]
+            x = x.transpose(0, 1)  # [B, F, hidden]
+            x = x + self.in_bias.unsqueeze(0)
+            x = self.dropout(x)
+            x = self.layernorm(x)
+            x = self.activation(x)
+
+        # Output layer
+        B = x.shape[0]
+        x = x.transpose(0, 1)  # [F, B, hidden]
+        x = torch.bmm(x, self.out_weight)  # [F, B, hidden] @ [F, hidden, out] -> [F, B, out]
+        x = x.transpose(0, 1)  # [B, F, out]
+        x = x + self.out_bias.unsqueeze(0)
+
+        return x
 
 
 class TransformerPredictor(nn.Module):

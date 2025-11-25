@@ -1,7 +1,6 @@
 import math
 from typing import Optional
 
-from sklearn.preprocessing import OneHotEncoder
 from tabulate import tabulate
 import torch
 import torch.nn as nn
@@ -320,19 +319,14 @@ class Encoder(nn.Module):
             x_cat = x[:, self.idx_cat_features] if len(self.idx_cat_features) > 0 else None
 
         if x_cat is not None:
-            with profiler.profile("categorical_encoding"):
-                x_cat = x_cat.detach().cpu().numpy()
-                categories = [list(range(card[1])) for card in self.cardinalities]
-                ohe = OneHotEncoder(sparse_output=False, categories=categories).fit(x_cat)
-                x_cat = torch.tensor(ohe.transform(x_cat), device=x_num.device)
-
-                cardinalities = [card[1] for card in self.cardinalities]
-                split_indices = torch.tensor([0] + cardinalities).cumsum(0)
-                one_hot_features = [
-                    x_cat[:, split_indices[i] : split_indices[i + 1]]
-                    for i in range(len(split_indices) - 1)
-                ]
-                cat_indices = [torch.argmax(feature, dim=1) for feature in one_hot_features]
+            # OPTIMIZATION: Categorical features are already label-encoded integers.
+            # No need for CPU transfer + OneHotEncoder + GPU transfer roundtrip.
+            # Just convert to long indices and split by feature.
+            with profiler.profile("categorical_indexing"):
+                # Convert to long type for embedding lookup
+                x_cat = x_cat.long()
+                # Split into list of tensors, one per categorical feature
+                cat_indices = [x_cat[:, i] for i in range(x_cat.shape[1])]
         else:
             cat_indices = None
 

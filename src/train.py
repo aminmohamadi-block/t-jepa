@@ -475,7 +475,7 @@ class Trainer:
                                 with self.profiler.profile("predictor"):
                                     if self.args.pred_type == "mlp":
                                         z_for_pred = z_for_pred.view(z_for_pred.size(0), -1)  # flatten
-                                        z_pred = self.predictors(z_for_pred, masks_pred.transpose(0, 1))
+                                        z_pred = self.predictors(z_for_pred, None, masks_pred)
 
                                     else:  # Transformer predictor
                                         # Pass [CLS, masked_features] to predictor (REG already removed)

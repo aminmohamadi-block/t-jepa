@@ -216,6 +216,9 @@ def main(args):
         for pred in predictors.predictors:
             for m in pred.modules():
                 init_weights(m, init_type=args.init_type)
+    else:
+        for m in predictors.predictors.modules():
+            init_weights(m, init_type=args.init_type)
 
     target_encoder = copy.deepcopy(context_encoder)
 
