@@ -169,3 +169,15 @@ latex/
 .vscode/
 .cursor/
 *.code-workspace
+
+# SLURM job logs
+slurm-*.out
+
+# Model checkpoints (large binary files)
+checkpoints/
+*.ckpt
+*.pth
+
+# Claude Code local settings
+.claude/settings.local.json
+.claude/.nfs*
