@@ -181,3 +181,12 @@ checkpoints/
 # Claude Code local settings
 .claude/settings.local.json
 .claude/.nfs*
+
+# Lightning/Tensorboard logs
+lightning_logs/
+
+# Job logs
+logs/
+
+# MLflow local runs
+mlruns/
