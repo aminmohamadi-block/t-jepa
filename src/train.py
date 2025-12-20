@@ -290,9 +290,6 @@ class Trainer:
 
                     device = "cuda:0" if torch.cuda.is_available() else "cpu"
                     dataset_args = vars(online_dataset_args).copy()
-
-                    # First, create dataset_args with basic config
-                    probe_epochs = 10 if not self.args.test else 1
                     dataset_args.update(
                         {
                             "test_size_ratio": 0.1,
@@ -300,7 +297,7 @@ class Trainer:
                             "batch_size": 4096,  # Large batch for fast probe training
                             "task_type": online_dataset.task_type,
                             "using_embedding": True,
-                            "exp_train_total_epochs": probe_epochs,
+                            "exp_train_total_epochs": 10 if not self.args.test else 1,
                             "model_name": self.probe_model,
                             "dataset_name": online_dataset_args.data_set,
                             "exp_patience": 10,
@@ -309,7 +306,6 @@ class Trainer:
                     )
                     dataset_args = Namespace(**dataset_args)
 
-                    # Create datamodule to calculate iterations_per_epoch
                     datamodule = DataModule(
                         dataset=online_dataset,
                         test_size_ratio=dataset_args.test_size_ratio,
@@ -324,14 +320,6 @@ class Trainer:
                         mock=dataset_args.mock,
                         using_embedding=True,
                     )
-
-                    # Setup datamodule to get train dataloader
-                    datamodule.setup("train")
-                    iterations_per_epoch = len(datamodule.train_dataloader())
-
-                    # Add num_epochs and iterations_per_epoch for proper LR scheduler
-                    dataset_args.num_epochs = probe_epochs
-                    dataset_args.iterations_per_epoch = iterations_per_epoch
 
                     base_config = {
                         "dataset_name": self.args.data_set,
@@ -430,6 +418,7 @@ class Trainer:
                     elif hasattr(self.dataloader, "set_epoch"):
                         self.dataloader.set_epoch(self.epoch)
                 total_loss = torch.zeros(1, device=self.device)
+                m = 0  # Initialize momentum variable for logging
 
                 for itr, (batch, masks_enc, masks_pred) in enumerate(tqdm(self.dataloader)):
 

@@ -24,7 +24,7 @@ def build_parser():
 
     parser.add_argument(
         "--mock",
-        type=bool,
+        type="bool",
         default=False,
         help="If True, use a mock dataset for testing purposes.",
     )
@@ -623,7 +623,7 @@ def build_parser():
     )
     parser.add_argument(
         "--use_vectorized_masking",
-        type=bool,
+        type="bool",
         default=False,
         help="Use vectorized mask generation (16.9x faster) instead of original sequential implementation.",
     )

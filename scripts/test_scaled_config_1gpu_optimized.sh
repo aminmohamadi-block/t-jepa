@@ -69,7 +69,9 @@ python run.py \
   --exp_patience=250 \
   --exp_cache_cadence=25 \
   --batch_size=4096 \
-  --exp_lr=1.0e-4 \
+  --exp_start_lr=1.0e-4 \
+  --exp_lr=1.0e-3 \
+  --exp_final_lr=1.0e-5 \
   --exp_final_weight_decay=1e-3 \
   --model_dim_hidden=64 \
   --model_num_layers=4 \
