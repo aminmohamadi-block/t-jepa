@@ -212,10 +212,13 @@ def apply_masks_from_idx(x, masks):
     :param x: tensor of shape [B (batch-size), N (num-feature), D (feature-dim)]
     :param masks: list of tensors containing indices of feature rep in [N] to keep
 
-    OPTIMIZATION: Use advanced indexing to avoid creating large temporary tensors.
+    Original implementation (kept for reference):
+        for m in masks:
+            mask_keep = m.unsqueeze(-1).repeat(1, 1, x.size(-1))  # Creates huge temp tensor
+            all_x += [torch.gather(x, dim=1, index=mask_keep)]
+
+    Optimized: Use advanced indexing to avoid creating large temporary tensors.
     Instead of repeating mask across D dimension, use batch indices with advanced indexing.
-    This eliminates the need for mask_keep = m.unsqueeze(-1).repeat(1, 1, x.size(-1))
-    which creates a large temporary tensor.
     """
     all_x = []
     B = x.size(0)

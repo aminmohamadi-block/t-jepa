@@ -190,3 +190,33 @@ logs/
 
 # MLflow local runs
 mlruns/
+
+# Profiling results and visualizations
+results/profiling/
+
+# Datasets (downloaded separately) - only root directory
+/datasets/
+
+# Temporary files and experiment results
+tmp/
+
+# Generated plots and reports
+*.pdf
+
+# Ad-hoc analysis and benchmark scripts (not part of core codebase)
+analyze_*.py
+benchmark_*.py
+check_*.py
+inspect_*.py
+plot_*.py
+deep_analysis_*.py
+gpu_mask_generator_poc.py
+test_*.py
+!src/**/test_*.py
+
+# Ad-hoc shell scripts in root
+monitor_and_visualize.sh
+
+# NFS lock files
+.nfs*
+**/.nfs*

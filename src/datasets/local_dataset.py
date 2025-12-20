@@ -536,8 +536,9 @@ def process_file(
 
 def extract_features(file_path, subtract_tensor, divide_tensor, infill_tensor, features_to_keep, df, feature_scaling):
     features_np = df.select(features_to_keep).to_numpy()
-    # Copy is required as pytorch does not support non-writeable tensors
-    features = torch.from_numpy(features_np.copy()).float()
+    # Use torch.tensor() directly - it always creates a new writeable tensor
+    # and handles dtype conversion in one step (avoids redundant .copy())
+    features = torch.tensor(features_np, dtype=torch.float32)
     if features.shape[1] != len(subtract_tensor):
         raise_value_error(f"Dimension mismatch during scaling {file_path}! Features: {features.shape[1]}, Stats: {len(subtract_tensor)}")
     nan_mask = torch.isnan(features)
@@ -566,8 +567,9 @@ def extract_features(file_path, subtract_tensor, divide_tensor, infill_tensor, f
 
 def extract_target(target_col, df):
     target_np = df[target_col].to_numpy()
-    # Copy is required as pytorch does not support non-writeable tensors
-    target = torch.from_numpy(target_np.copy()).float()
+    # Use torch.tensor() directly - it always creates a new writeable tensor
+    # and handles dtype conversion in one step (avoids redundant .copy())
+    target = torch.tensor(target_np, dtype=torch.float32)
     return target
 
 

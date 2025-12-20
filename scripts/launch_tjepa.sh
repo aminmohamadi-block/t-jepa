@@ -50,6 +50,9 @@ LOAD_FROM_CHECKPOINT=False
 LOAD_PATH=""
 TAG=""
 PROJECT_NAME="t-jepa-test"
+PROFILING_LEVEL="DISABLED"
+PROFILING_OUTPUT=""
+PROFILING_SUMMARY_EVERY=10
 
 # Detect number of GPUs requested (from SLURM or user flag)
 NUM_GPUS=${SLURM_GPUS:-1}
@@ -352,6 +355,21 @@ while [[ $# -gt 0 ]]; do
             shift
             shift
             ;;
+        --profiling_level)
+            PROFILING_LEVEL="$2"
+            shift
+            shift
+            ;;
+        --profiling_output)
+            PROFILING_OUTPUT="$2"
+            shift
+            shift
+            ;;
+        --profiling_summary_every)
+            PROFILING_SUMMARY_EVERY="$2"
+            shift
+            shift
+            ;;
         -h|--help)
             show_help
             exit 0
@@ -413,6 +431,13 @@ fi
 
 # Add project name
 COMMAND="$COMMAND --project_name=$PROJECT_NAME"
+
+# Add profiling arguments
+COMMAND="$COMMAND --profiling_level=$PROFILING_LEVEL --profiling_summary_every=$PROFILING_SUMMARY_EVERY"
+
+if [ -n "$PROFILING_OUTPUT" ]; then
+    COMMAND="$COMMAND --profiling_output=$PROFILING_OUTPUT"
+fi
 
 # Append distributed flag
 COMMAND="$COMMAND $DISTRIBUTED_FLAG"
