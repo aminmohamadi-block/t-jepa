@@ -549,11 +549,100 @@ class PerformanceProfiler:
 _global_profiler: Optional[PerformanceProfiler] = None
 
 
+class NoOpContextManager:
+    """Zero-overhead context manager that does nothing."""
+    __slots__ = ()  # No instance dict for minimal memory
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+
+class NoOpProfiler:
+    """
+    Zero-overhead profiler for production use.
+
+    All methods are no-ops with minimal overhead. This is used when
+    profiling is disabled to avoid even the cost of checking is_enabled().
+    """
+    __slots__ = ('_noop_ctx',)  # Minimal memory footprint
+
+    def __init__(self):
+        self._noop_ctx = NoOpContextManager()
+
+    def set_level(self, level: ProfilingLevel):
+        pass
+
+    def is_enabled(self) -> bool:
+        return False
+
+    def profile(self, name: str, metadata: Optional[Dict] = None, **context):
+        return self._noop_ctx
+
+    def trace_mode(self, trace_dir: str = "./profiler_traces"):
+        return self._noop_ctx
+
+    def step_profiler(self):
+        pass
+
+    def get_summary(self, sort_by: str = "total_time") -> List[Dict]:
+        return []
+
+    def print_summary(self, top_k: int = 30, sort_by: str = "total_time"):
+        print("Profiler is disabled (NoOpProfiler).")
+
+    def get_breakdown(self, parent: Optional[str] = None) -> Dict[str, float]:
+        return {}
+
+    def print_breakdown(self, parent: Optional[str] = None):
+        print("Profiler is disabled (NoOpProfiler).")
+
+    def save_results(self, filepath: str):
+        print(f"Profiler is disabled, no results to save.")
+
+    def log_to_mlflow(self, mlflow):
+        pass
+
+    def reset(self):
+        pass
+
+
+# Singleton NoOpProfiler for zero-overhead when disabled
+_noop_profiler = NoOpProfiler()
+
+
 def get_profiler() -> PerformanceProfiler:
     """Get the global profiler instance."""
     global _global_profiler
     if _global_profiler is None:
         _global_profiler = PerformanceProfiler()
+    return _global_profiler
+
+
+def init_profiler(level: ProfilingLevel) -> PerformanceProfiler:
+    """
+    Initialize the global profiler with the specified level.
+
+    For DISABLED level, returns a NoOpProfiler with zero overhead.
+    This should be called once at startup.
+
+    Args:
+        level: Profiling level to use
+
+    Returns:
+        The initialized profiler (either PerformanceProfiler or NoOpProfiler)
+    """
+    global _global_profiler
+
+    if level == ProfilingLevel.DISABLED:
+        _global_profiler = _noop_profiler
+        print("[Profiling] Disabled - using zero-overhead NoOpProfiler")
+    else:
+        _global_profiler = PerformanceProfiler(level=level)
+        print(f"[Profiling] Enabled at level: {level.name}")
+
     return _global_profiler
 
 

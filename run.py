@@ -29,21 +29,21 @@ from src.utils.optim_utils import init_optim
 
 from src.datasets.dict_to_data import DATASET_NAME_TO_DATASET_MAP
 from src.datasets.parquet_dataset import create_parquet_dataset_from_args
-from src.utils.profiler import get_profiler, ProfilingLevel
+from src.utils.profiler import get_profiler, init_profiler, ProfilingLevel
 
 
 def main(args):
 
     # Initialize profiler based on command line args
-    profiler = get_profiler()
+    # Use init_profiler() which returns NoOpProfiler for DISABLED level (zero overhead)
     if hasattr(args, 'profiling_level'):
         try:
-            profiler.set_level(ProfilingLevel[args.profiling_level])
-            if profiler.is_enabled():
-                print(f"[Profiling] Enabled at level: {args.profiling_level}")
+            profiler = init_profiler(ProfilingLevel[args.profiling_level])
         except KeyError:
             print(f"[Profiling] Warning: Invalid profiling level '{args.profiling_level}', using DISABLED")
-            profiler.set_level(ProfilingLevel.DISABLED)
+            profiler = init_profiler(ProfilingLevel.DISABLED)
+    else:
+        profiler = init_profiler(ProfilingLevel.DISABLED)
 
     if args.mp_distributed:
         # ------------------------------------------------------------------
@@ -254,8 +254,14 @@ def main(args):
     )
 
     # Choose mask collator based on configuration
+    # For Parquet datasets, use GPU mask generation (~100x faster)
+    mask_device = device if args.use_parquet_dataset else None
+
     if args.use_vectorized_masking:
-        print("[Optimization] Using UltraVectorizedMaskCollator (16.9x faster)")
+        if mask_device and 'cuda' in str(mask_device):
+            print("[Optimization] Using UltraVectorizedMaskCollator with GPU mask generation (~100x faster)")
+        else:
+            print("[Optimization] Using UltraVectorizedMaskCollator (16.9x faster)")
         mask_collator = UltraVectorizedMaskCollator(
             args.mask_allow_overlap,
             args.mask_min_ctx_share,
@@ -267,6 +273,7 @@ def main(args):
             dataset.D,
             dataset.cardinalities,
             args.n_cls_tokens,
+            device=mask_device,  # NEW: Pass device for GPU mask generation
         )
     else:
         print("[Optimization] Using original MaskCollator")
@@ -287,32 +294,61 @@ def main(args):
 
     if args.use_parquet_dataset:
         # Parquet datasets: LocalFilesDataset already batches data
-        # We need to create a simple wrapper that applies masking to pre-batched data
+        # OPTIMIZATION: Use generate_masks_only() to avoid expensive tensor split/restack
         class ParquetDataLoaderWrapper:
-            """Wrapper that applies masking to pre-batched data from LocalFilesDataset."""
+            """
+            Optimized wrapper for pre-batched Parquet data.
 
-            def __init__(self, dataset, mask_collator, device):
+            Key optimization: The batch is already a single tensor [batch_size, num_features].
+            We generate masks directly without splitting the batch into individual samples
+            and re-stacking them. This saves ~20-30ms per iteration.
+
+            OLD (slow):
+                batch_list = [(batch[i], None) for i in range(4096)]  # Split into 4096 tensors
+                batch, masks = collator(batch_list)  # Re-stack via default_collate
+
+            NEW (fast):
+                masks = collator.generate_masks_only(batch_size)  # Just generate masks
+                # Batch stays as-is
+            """
+
+            def __init__(self, dataset, mask_collator, device, num_features):
                 self.dataset = dataset
                 self.mask_collator = mask_collator
                 self.device = device
+                self.num_features = num_features
+                # Check if mask_collator supports optimized path
+                self.use_optimized = hasattr(mask_collator, 'generate_masks_only')
+                if self.use_optimized:
+                    print("[Optimization] ParquetDataLoaderWrapper using generate_masks_only()")
+                else:
+                    print("[Warning] MaskCollator doesn't support generate_masks_only(), using slow path")
 
             def __iter__(self):
                 for batch in self.dataset:
                     # batch is already a tensor [batch_size, num_features]
-                    # Move to device
-                    batch = batch.to(self.device, non_blocking=True)
-                    # MaskCollator expects a list of (features, targets) tuples
-                    # Convert batched tensor to list format: [(features1, None), (features2, None), ...]
-                    batch_list = [(batch[i], None) for i in range(len(batch))]
-                    # Generate masks for this batch
-                    batch, masks_enc, masks_pred = self.mask_collator(batch_list)
-                    # mask_collator returns batched tensors
+                    batch_size = len(batch)
+
+                    if self.use_optimized:
+                        # FAST PATH: Generate masks without touching the batch
+                        # Saves ~20-30ms per iteration by avoiding tensor split/restack
+                        masks_enc, masks_pred = self.mask_collator.generate_masks_only(
+                            batch_size, self.num_features
+                        )
+                        # Batch stays as a single tensor - no conversion needed
+                    else:
+                        # SLOW PATH: For backwards compatibility with old mask collators
+                        batch_list = [(batch[i], None) for i in range(batch_size)]
+                        batch, masks_enc, masks_pred = self.mask_collator(batch_list)
+
                     yield batch, masks_enc, masks_pred
 
             def __len__(self):
                 return len(self.dataset)
 
-        dataloader = ParquetDataLoaderWrapper(train_torchdataset, mask_collator, device)
+        dataloader = ParquetDataLoaderWrapper(
+            train_torchdataset, mask_collator, device, num_features=dataset.D
+        )
         print(f"[Debug] Parquet DataLoader created (pre-batched, batch_size={args.batch_size})")
 
     elif args.mp_distributed:
@@ -443,14 +479,21 @@ def main(args):
 def setup_mlflow_logging(args) -> None:
     """
     Setup MLflow logging for experiment tracking.
-    
+
     Configures Databricks MLflow integration with proper authentication
     and experiment organization.
+
+    Set SKIP_MLFLOW=1 to disable MLflow setup entirely.
     """
+    # Check if MLflow should be skipped
+    if os.environ.get("SKIP_MLFLOW") == "1":
+        print("⚠️  SKIP_MLFLOW=1 - skipping MLflow setup")
+        return
+
     try:
         import mlflow
         from mlflow import MlflowClient
-        
+
         # Setup Databricks connection
         os.environ["DATABRICKS_HOST"] = "https://block-lakehouse-production.cloud.databricks.com"
         

@@ -175,3 +175,39 @@ latex/
 
 # Profiling results and visualizations
 results/profiling/
+
+# Model checkpoints (large binary files)
+checkpoints/
+
+# Datasets (downloaded separately) - only root directory
+/datasets/
+
+# PyTorch Lightning logs
+lightning_logs/
+
+# MLflow local tracking
+mlruns/
+
+# Temporary files and experiment results
+tmp/
+
+# Generated plots and reports
+*.pdf
+
+# Ad-hoc analysis and benchmark scripts (not part of core codebase)
+analyze_*.py
+benchmark_*.py
+check_*.py
+inspect_*.py
+plot_*.py
+deep_analysis_*.py
+gpu_mask_generator_poc.py
+test_*.py
+!src/**/test_*.py
+
+# Ad-hoc shell scripts in root
+monitor_and_visualize.sh
+
+# NFS lock files
+.nfs*
+**/.nfs*
